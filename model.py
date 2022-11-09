@@ -10,10 +10,8 @@ def smape_loss(y_pred, target):
     loss = 2 * (y_pred - target).abs() / (y_pred.abs() + target.abs() + 1e-8)
     return loss.mean()
 
-
 def gen_trg_mask(length, device):
-    mask = torch.tril(torch.ones(length, length, device=device)) == 1
-
+    mask = torch.tril(torch.ones(length, length, device=device))==1
     mask = (
         mask.float()
         .masked_fill(mask == 0, float("-inf"))
@@ -27,7 +25,9 @@ class Spec2label(nn.Module):
         self,
         n_encoder_inputs,
         n_outputs,
-        channels=512,
+        channels=64,
+        n_heads=8,
+        n_layers=8,
         dropout=0.2,
         lr=1e-4,
     ):
@@ -44,14 +44,12 @@ class Spec2label(nn.Module):
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=channels,
-            nhead=8,
+            nhead=n_heads,
             dropout=self.dropout,
             dim_feedforward=4*channels,
         )
-
-        self.encoder = torch.nn.TransformerEncoder(encoder_layer, num_layers=8)
+        self.encoder = torch.nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
         # self.decoder = torch.nn.TransformerDecoder(decoder_layer, num_layers=8)
-
         self.input_projection = Linear(n_encoder_inputs, channels)
         # self.output_projection = Linear(n_decoder_inputs, channels)
 
@@ -88,6 +86,7 @@ class Spec2label(nn.Module):
 
         src = self.fc1(src) # (bs, 64)
         src = F.relu(src)
+        src = self.do(src)
         tgt = self.fc2(src) # (bs, 2)
         # out = self.decode_trg(trg=trg, memory=src)
         return tgt

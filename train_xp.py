@@ -12,9 +12,9 @@ from data import GaiaXPlabel_v2
 
 
 if __name__ == "__main__":
-    #=========================Data loading ================================
+    #=========================Data loadin ================================
     data_dir = "/data/jdli/gaia/"
-    tr_file = "ap17_xp.npy"
+    tr_file = "ap17_xpcut.npy"
 
     device = torch.device('cuda:0')
     TOTAL_NUM = 6000
@@ -38,13 +38,17 @@ if __name__ == "__main__":
     ##==============================================================
     #===============================================================
     model = Spec2label(
-        n_encoder_inputs=343,
+        n_encoder_inputs=346,
         n_outputs=2,
         lr=1e-5,
         dropout=0.2,
+        channels=128,
+        n_heads=8,
+        n_layers=8,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    objective_function = torch.nn.L1Loss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, patience=10, factor=0.1
         )
@@ -78,7 +82,8 @@ if __name__ == "__main__":
         filename="ts",
     )
     
-    print("Traing %s begin"%tr_select)
+    # print("Traing %s begin"%tr_select)
+    print("update")
 
     for epoch in range(num_epochs):
         model.train()
@@ -89,6 +94,9 @@ if __name__ == "__main__":
             # output = model(data['x'], data['y'])
             output = model(data['x'])
             loss = smape_loss(output.view(-1), data['y'].view(-1))
+            # loss = objective_function(
+            #     output.view(-1), data['y'].view(-1)
+            # )
             loss_value = loss.item()
 
             optimizer.zero_grad()
@@ -110,6 +118,9 @@ if __name__ == "__main__":
                     for data in val_loader:
                         output = model(data['x'])
                         loss = smape_loss(output.view(-1), data['y'].view(-1))
+                        # loss = objective_function(
+                        #     output.view(-1), data['y'].view(-1)
+                        # )
                         total_val_loss+=loss.item()
                         k+=1
                         del data, output

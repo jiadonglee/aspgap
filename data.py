@@ -222,7 +222,7 @@ class GaiaXPlabel():
     """
     def __init__(self, npydata, total_num=6000, part_train=True, device=torch.device('cpu')) -> None:
         self.data = np.load(npydata, allow_pickle=True).item()
-        self.spec = self.data['spec']
+        self.spec = self.data['norm_spec']
         self.total_num = total_num
         self.part_train = part_train
         self.device = device
@@ -253,7 +253,7 @@ class GaiaXPlabel_v2():
     """
     def __init__(self, npydata, total_num=6000, part_train=True, device=torch.device('cpu')) -> None:
         self.data = np.load(npydata, allow_pickle=True).item()
-        self.spec = self.data['spec']
+        self.spec = self.data['norm_spec']
         self.total_num = total_num
         self.part_train = part_train
         self.device = device
@@ -267,13 +267,17 @@ class GaiaXPlabel_v2():
 
     def __getitem__(self, idx: int):
 
-        lnflux = self.spec[idx,:,1]
+        lnflux = self.spec[idx,:]
         lnflux[np.isnan(lnflux)] = np.mean(lnflux)
-        lnflux = torch.tensor(lnflux.reshape(1,-1).astype(np.float32))
+        photo = np.vstack([self.data['J'][idx], 
+                           self.data['H'][idx], 
+                           self.data['K'][idx]]).reshape(-1)
+        
+        lnflux = torch.tensor(
+            np.hstack([lnflux, photo]).reshape(1,-1).astype(np.float32)
+        )
 
-        moh = self.data['moh'][idx]
-        aom = self.data['aom'][idx]
-
-        output = np.vstack([moh, aom])
-        output = torch.tensor(output.reshape(1,-1).astype(np.float32))
+        abundance = np.vstack([self.data['moh'][idx], self.data['aom'][idx]])
+        
+        output = torch.tensor(abundance.reshape(1,-1).astype(np.float32))
         return {'x':lnflux.to(self.device), 'y':output.to(self.device), 'id':self.data['source_id'][idx]}
