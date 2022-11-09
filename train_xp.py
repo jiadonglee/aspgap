@@ -8,19 +8,19 @@ import time
 import torch
 from torch.utils.data import DataLoader
 from model import Spec2label, smape_loss
-from data import GaiaXPlabel_v2
+from data import GaiaXPlabel_cont
 
 
 if __name__ == "__main__":
     #=========================Data loadin ================================
     data_dir = "/data/jdli/gaia/"
-    tr_file = "ap17_xpcut.npy"
+    tr_file = "ap17_xpcont_cut.npy"
 
     device = torch.device('cuda:0')
     TOTAL_NUM = 6000
     BATCH_SIZE = 16
 
-    gdata  = GaiaXPlabel_v2(data_dir+tr_file, total_num=TOTAL_NUM,
+    gdata  = GaiaXPlabel_cont(data_dir+tr_file, total_num=TOTAL_NUM,
     part_train=False, device=device)
 
     val_size = int(0.1*len(gdata))
@@ -30,15 +30,15 @@ if __name__ == "__main__":
     A_dataset, B_dataset, val_dataset = torch.utils.data.random_split(gdata, [A_size, B_size, val_size], generator=torch.Generator().manual_seed(42))
     print(len(A_dataset), len(B_dataset), len(val_dataset))
 
-    A_loader = DataLoader(A_dataset, batch_size=BATCH_SIZE, )
-    B_loader = DataLoader(B_dataset, batch_size=BATCH_SIZE, )
+    A_loader = DataLoader(A_dataset, batch_size=BATCH_SIZE)
+    B_loader = DataLoader(B_dataset, batch_size=BATCH_SIZE)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
 
     ##==================Model parameters============================
     ##==============================================================
     #===============================================================
     model = Spec2label(
-        n_encoder_inputs=346,
+        n_encoder_inputs=55*2+3,
         n_outputs=2,
         lr=1e-5,
         dropout=0.2,
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     ).to(device)
 
     objective_function = torch.nn.L1Loss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-7)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, patience=10, factor=0.1
         )
@@ -69,7 +69,7 @@ if __name__ == "__main__":
 
     log_dir   = "/data/jdli/gaia/model/forcasting_1107A.log"
     model_dir = "/data/jdli/gaia/model/"
-    save_model_name = "model/enc_GXP_221109"+tr_select+"ep"+str(num_epochs)+".pt"
+    save_model_name = "model/enc_GXPcont_221109"+tr_select+"ep"+str(num_epochs)+".pt"
 
     logger = TensorBoardLogger(
         save_dir=log_dir,
@@ -82,7 +82,7 @@ if __name__ == "__main__":
         filename="ts",
     )
     
-    # print("Traing %s begin"%tr_select)
+    print("Traing %s begin"%tr_select)
     print("update")
 
     for epoch in range(num_epochs):
