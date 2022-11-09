@@ -1,12 +1,14 @@
-from cmath import log
-import numpy as np
+# from cmath import log
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
+# import numpy as np
 # %load_ext autoreload
 # %autoreload 2
 import time
 import torch
 from torch.utils.data import DataLoader
-from transformer import TransformerReg, TransAm
-from data import GaiaXPlabel
+from model import Spec2label, smape_loss
+from data import GaiaXPlabel_v2
 
 
 if __name__ == "__main__":
@@ -14,11 +16,11 @@ if __name__ == "__main__":
     data_dir = "/data/jdli/gaia/"
     tr_file = "ap17_xp.npy"
 
-    device = torch.device('cuda:1')
+    device = torch.device('cuda:0')
     TOTAL_NUM = 6000
-    BATCH_SIZE = 64
+    BATCH_SIZE = 16
 
-    gdata  = GaiaXPlabel(data_dir+tr_file, total_num=TOTAL_NUM,
+    gdata  = GaiaXPlabel_v2(data_dir+tr_file, total_num=TOTAL_NUM,
     part_train=False, device=device)
 
     val_size = int(0.1*len(gdata))
@@ -35,29 +37,20 @@ if __name__ == "__main__":
     ##==================Model parameters============================
     ##==============================================================
     #===============================================================
-    dim_val = 64 # This can be any value divisible by n_heads. 512 is used in the original transformer paper.
-    n_heads = 4 # The number of attention heads (aka parallel attention layers). dim_val must be divisible by this number
-    n_decoder_layers = 2 # Number of times the decoder layer is stacked in the decoder
-    n_encoder_layers = 2 # Number of times the encoder layer is stacked in the encoder
-    extd_size = 0
+    model = Spec2label(
+        n_encoder_inputs=343,
+        n_outputs=2,
+        lr=1e-5,
+        dropout=0.2,
+    ).to(device)
 
-    input_size = 1 # The number of input variables. 1 if univariate forecasting.
-    enc_seq_len = 343 # length of input given to encoder. Can have any integer value.
-    dec_seq_len = 2 # length of input given to decoder. Can have any integer value.
-    output_sequence_length = 2
-    max_seq_len = 343 # What's the longest sequence the model will encounter? Used to make the positional encoder
-    # model = TransformerReg(
-    #     input_size,  batch_first=True,  dec_seq_len=2,
-    #     dim_val=dim_val, enc_seq_len=enc_seq_len,
-    #     out_seq_len=output_sequence_length, n_decoder_layers=n_decoder_layers,n_encoder_layers=n_encoder_layers, n_heads=n_heads,
-    #     max_seq_len=max_seq_len,
-    #     ).to(device)
-    model = TransAm(feature_size=64, enc_len=343, tgt_len=2, num_layers=2, dropout=0.2).to(device)
-
-    criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-7)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, patience=10, factor=0.1
+        )
+    
     total_loss = 0.
-    num_epochs = 50
+    num_epochs = 100
     # num_batches = train_size//BATCH_SIZE
     itr = 1
     num_iters  = 100
@@ -68,10 +61,25 @@ if __name__ == "__main__":
         tr_loader = A_loader
     elif tr_select=="B":
         tr_loader = B_loader
-        
-    save_model_name = "model/trsfm_GXP_221105"+tr_select+"ep"+str(num_epochs)+".pt"
+
+
+    log_dir   = "/data/jdli/gaia/model/forcasting_1107A.log"
+    model_dir = "/data/jdli/gaia/model/"
+    save_model_name = "model/enc_GXP_221109"+tr_select+"ep"+str(num_epochs)+".pt"
+
+    logger = TensorBoardLogger(
+        save_dir=log_dir,
+    )
+
+    checkpoint_callback = ModelCheckpoint(
+        monitor="valid_loss",
+        mode="min",
+        dirpath=model_dir,
+        filename="ts",
+    )
     
     print("Traing %s begin"%tr_select)
+
     for epoch in range(num_epochs):
         model.train()
         
@@ -80,7 +88,7 @@ if __name__ == "__main__":
 
             # output = model(data['x'], data['y'])
             output = model(data['x'])
-            loss = criterion(output, data['y'])
+            loss = smape_loss(output.view(-1), data['y'].view(-1))
             loss_value = loss.item()
 
             optimizer.zero_grad()
@@ -101,7 +109,7 @@ if __name__ == "__main__":
                     total_val_loss = 0
                     for data in val_loader:
                         output = model(data['x'])
-                        loss = criterion(output, data['y'])
+                        loss = smape_loss(output.view(-1), data['y'].view(-1))
                         total_val_loss+=loss.item()
                         k+=1
                         del data, output

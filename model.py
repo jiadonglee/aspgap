@@ -1,10 +1,9 @@
-import pytorch_lightning as pl
+
 import torch
 import torch.nn as nn
 from torch.nn import Linear
 import torch.nn.functional as F
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
+
 
 
 def smape_loss(y_pred, target):
@@ -34,7 +33,7 @@ class Spec2label(nn.Module):
     ):
         super().__init__()
 
-        self.save_hyperparameters()
+        # self.save_hyperparameters()
         self.channels = channels
         self.n_outputs = n_outputs
         self.lr = lr
