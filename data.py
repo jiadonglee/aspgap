@@ -312,6 +312,40 @@ class GaiaXPlabel_cont():
         )
 
         abundance = self.df[['M_H','ALPHA_M']].values[idx]
-        output = torch.tensor(abundance.reshape(1,-1).astype(np.float32))
+        e_abundance = self.df[['M_H_ERR', 'ALPHA_M_ERR']].values[idx]
+        output   = torch.tensor(abundance.reshape(-1).astype(np.float32))
+        e_output = torch.tensor(e_abundance.reshape(-1).astype(np.float32))
 
-        return {'x':coeffs.to(self.device), 'y':output.to(self.device), 'id':self.df['source_id'].values[idx]}
+        return {'x':coeffs.to(self.device), 'y':output.to(self.device), 'e_y':e_output.to(self.device), 'id':self.df['source_id'].values[idx]}
+
+
+class GaiaXPlabel_cont_infer():
+    """Gaia DR3 XP continuous spectrum to stellar labels instance
+    """
+    def __init__(self, npydata, total_num=6000, part_train=True, device=torch.device('cpu')) -> None:
+        self.data = np.load(npydata, allow_pickle=True).item()
+        self.bp = self.data['norm_bp_coef']
+        self.rp = self.data['norm_rp_coef']
+        self.df = self.data['df']
+        self.total_num = total_num
+        self.part_train = part_train
+        self.device = device
+    
+    def __len__(self) -> int:
+        if self.part_train:
+            num_sets = self.total_num
+        else:
+            num_sets = len(self.df)
+        return num_sets
+
+    def __getitem__(self, idx: int):
+
+        coeffs = np.hstack([self.bp[idx], self.rp[idx]])
+        coeffs[np.isnan(coeffs)] = np.mean(coeffs)
+        photo = self.df[['Jmag','Hmag','Kmag']].values[idx]
+        
+        coeffs = torch.tensor(
+            np.hstack([coeffs, photo]).reshape(1,-1).astype(np.float32)
+        )
+
+        return {'x':coeffs.to(self.device), 'id':self.df['source_id'].values[idx]}

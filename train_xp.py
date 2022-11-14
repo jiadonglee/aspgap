@@ -12,13 +12,13 @@ from data import GaiaXPlabel_cont
 
 
 if __name__ == "__main__":
-    #=========================Data loadin ================================
+    #=========================Data loading ================================
     data_dir = "/data/jdli/gaia/"
     tr_file = "ap17_xpcont_cut.npy"
 
     device = torch.device('cuda:0')
     TOTAL_NUM = 6000
-    BATCH_SIZE = 16
+    BATCH_SIZE = 512
 
     gdata  = GaiaXPlabel_cont(data_dir+tr_file, total_num=TOTAL_NUM,
     part_train=False, device=device)
@@ -47,29 +47,21 @@ if __name__ == "__main__":
         n_layers=8,
     ).to(device)
 
-    objective_function = torch.nn.L1Loss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-7)
+    cost = torch.nn.GaussianNLLLoss(full=True, reduction='mean')
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-8)
+
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, patience=10, factor=0.1
-        )
+            )
     
-    total_loss = 0.
-    num_epochs = 100
     # num_batches = train_size//BATCH_SIZE
     itr = 1
     num_iters  = 100
 
-    tr_select = "B"
 
-    if tr_select=="A":
-        tr_loader = A_loader
-    elif tr_select=="B":
-        tr_loader = B_loader
-
-
-    log_dir   = "/data/jdli/gaia/model/forcasting_1107A.log"
+    log_dir   = "/data/jdli/gaia/model/forcasting_1110A.log"
     model_dir = "/data/jdli/gaia/model/"
-    save_model_name = "model/enc_GXPcont_221109"+tr_select+"ep"+str(num_epochs)+".pt"
+    
 
     logger = TensorBoardLogger(
         save_dir=log_dir,
@@ -82,21 +74,35 @@ if __name__ == "__main__":
         filename="ts",
     )
     
-    print("Traing %s begin"%tr_select)
-    print("update")
+    tr_select = "A"
 
-    for epoch in range(num_epochs):
+    if tr_select=="A":
+        tr_loader = A_loader
+        check_point = "model/GXPcont_abundance/enc_GXPcont_221110_NGlll_A_ep500.pt"        
+
+    elif tr_select=="B":
+        tr_loader = B_loader
+        check_point = "model/GXPcont_abundance/enc_GXPcont_221110_NGlll_B_ep300.pt"        
+
+    print("Loading checkpint %s"%(check_point))
+    model.load_state_dict(torch.load(data_dir+check_point))
+
+    num_epochs = 500
+    print("Traing %s begin"%tr_select)
+
+
+    
+    for epoch in range(num_epochs+1):
         model.train()
         
-        for batch, data in enumerate(A_loader):
+        for batch, data in enumerate(tr_loader):
+            total_loss = 0.
             start = time.time()
 
             # output = model(data['x'], data['y'])
             output = model(data['x'])
-            loss = smape_loss(output.view(-1), data['y'].view(-1))
-            # loss = objective_function(
-            #     output.view(-1), data['y'].view(-1)
-            # )
+            # loss = smape_loss(output.view(-1), data['y'].view(-1))
+            loss = cost(output, data['y'], data['e_y'])
             loss_value = loss.item()
 
             optimizer.zero_grad()
@@ -107,25 +113,25 @@ if __name__ == "__main__":
             total_loss += loss.item()
             del data, output
 
-            if itr%num_iters == 0:
-                end = time.time()
-                print(f"Epoch #%d  Iteration #%d  tr loss:%.4f time:%.2f s"%(epoch, itr, total_loss/itr, (end-start)*num_iters))
-                    # writer.add_scalar('training loss = ',loss_value,epoch*itr)
-                model.eval()
-                with torch.no_grad():
-                    k=0
-                    total_val_loss = 0
-                    for data in val_loader:
-                        output = model(data['x'])
-                        loss = smape_loss(output.view(-1), data['y'].view(-1))
-                        # loss = objective_function(
-                        #     output.view(-1), data['y'].view(-1)
-                        # )
-                        total_val_loss+=loss.item()
-                        k+=1
-                        del data, output
-                print("val loss:%.4f"%(total_val_loss/k))
+            # if itr%num_iters == 0:
+        end = time.time()
+        print(f"Epoch #%d tr loss:%.4f time:%.2f s"%(epoch, loss.item(), (end-start)*num_iters))
+                # writer.add_scalar('training loss = ',loss_value,epoch*itr)
 
-            itr+=1
+        model.eval()
+        with torch.no_grad():
+            total_val_loss = 0
+            for bs, data in enumerate(val_loader):
+                output = model(data['x'])
+                # loss = smape_loss(output.view(-1), data['y'].view(-1))
+                loss = cost(output, data['y'], data['e_y'])
+                total_val_loss+=loss.item()
+                del data, output
+        print("val loss:%.4f"%(loss.item()))
+            # itr+=1
 
-    torch.save(model.state_dict(), data_dir+save_model_name)
+        if epoch%100==0:
+
+            save_point =  "model/GXPcont_abundance/1111/enc_GXPcont_221110_NGlll_%s_ep%d.pt"%(tr_select, 501+epoch)
+            torch.save(model.state_dict(), data_dir+save_point)
+            
