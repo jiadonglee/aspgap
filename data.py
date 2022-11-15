@@ -303,7 +303,7 @@ class GaiaXPlabel_cont():
 
     def __getitem__(self, idx: int):
 
-        coeffs = np.hstack([self.bp[idx], self.rp[idx]])
+        coeffs = np.hstack([self.bp[idx][:8], self.rp[idx][:8]])
         coeffs[np.isnan(coeffs)] = np.mean(coeffs)
         photo = self.df[['J','H','K']].values[idx]
         
@@ -311,10 +311,14 @@ class GaiaXPlabel_cont():
             np.hstack([coeffs, photo]).reshape(1,-1).astype(np.float32)
         )
 
-        abundance = self.df[['M_H','ALPHA_M']].values[idx]
-        e_abundance = self.df[['M_H_ERR', 'ALPHA_M_ERR']].values[idx]
-        output   = torch.tensor(abundance.reshape(-1).astype(np.float32))
-        e_output = torch.tensor(e_abundance.reshape(-1).astype(np.float32))
+        output = self.df[['TEFF', 'LOGG', 'M_H','ALPHA_M']].values[idx]
+        e_output = self.df[['TEFF_ERR', 'LOGG_ERR', 'M_H_ERR', 'ALPHA_M_ERR']].values[idx]
+        
+        e_output[0]= np.sqrt(np.square(e_output[0]/(output[0]*np.log(10))))
+        output[0]  = np.log10(output[0])
+
+        output   = torch.tensor(output.reshape(-1).astype(np.float32))
+        e_output = torch.tensor(e_output.reshape(-1).astype(np.float32))
 
         return {'x':coeffs.to(self.device), 'y':output.to(self.device), 'e_y':e_output.to(self.device), 'id':self.df['source_id'].values[idx]}
 
