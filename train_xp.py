@@ -50,8 +50,9 @@ if __name__ == "__main__":
         n_encoder_inputs=8+8+3, n_decoder_inputs=8+8+3+2, n_outputs=2, channels=345, nhead=3
         ).to(device)
 
-    cost = torch.nn.GaussianNLLLoss(full=True, reduction='mean')
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-8)
+    # cost = torch.nn.GaussianNLLLoss(full=True, reduction='sum')
+    cost = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, patience=10, factor=0.1
@@ -93,18 +94,17 @@ if __name__ == "__main__":
     num_epochs = 500
     print("Traing %s begin"%tr_select)
 
-    
-    for epoch in range(num_epochs+1):
+    def train_epoch(tr_loader):
         model.train()
-        
+        start = time.time()
         for batch, data in enumerate(tr_loader):
             total_loss = 0.
-            start = time.time()
 
             # output = model(data['x'], data['y'])
             output = model(data['x'])
             # loss = smape_loss(output.view(-1), data['y'].view(-1))
-            loss = cost(output, data['y'], data['e_y'])
+            # loss = cost(output, data['y'], data['e_y'])
+            loss = cost(output, data['y'],)
             loss_value = loss.item()
 
             optimizer.zero_grad()
@@ -112,28 +112,37 @@ if __name__ == "__main__":
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
 
-            total_loss += loss.item()
+            total_loss += loss_value
             del data, output
 
             # if itr%num_iters == 0:
         end = time.time()
 
-        print(f"Epoch #%d tr loss:%.4f time:%.2f s"%(epoch, loss.item(), (end-start)*num_iters))
-                # writer.add_scalar('training loss = ',loss_value,epoch*itr)
+        print(f"Epoch #%d tr loss:%.4f time:%.2f s"%(epoch, total_loss/(batch+1), (end-start)))
 
+    
+    def eval(val_loader):
         model.eval()
         with torch.no_grad():
             total_val_loss = 0
             for bs, data in enumerate(val_loader):
                 output = model(data['x'])
                 # loss = smape_loss(output.view(-1), data['y'].view(-1))
-                loss = cost(output, data['y'], data['e_y'])
+                # loss = cost(output, data['y'], data['e_y'])
+                loss = cost(output, data['y'],)
                 total_val_loss+=loss.item()
                 del data, output
-        print("val loss:%.4f"%(loss.item()))
-            # itr+=1
+        print("val loss:%.4f"%(total_val_loss/(bs+1)))
 
-        if epoch%100==0:
-            save_point =  "sp2hrd_%s_ep%d.pt"%(tr_select, 501+epoch)
+
+
+    for epoch in range(num_epochs+1):
+        train_epoch(tr_loader)
+
+        if epoch%5==0:
+            eval(val_loader)
+
+        if epoch%50==0:
+            save_point =  "sp2hrd_mse_%s_ep%d.pt"%(tr_select, epoch)
             torch.save(model.state_dict(), model_dir+save_point)
             
