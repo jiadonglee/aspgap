@@ -39,23 +39,23 @@ if __name__ == "__main__":
     #===============================================================
     model_tefflogg = Spec2label(
         n_encoder_inputs=8+8+3, n_outputs=2, 
-        channels=128, n_heads=8, n_layers=8,
+        channels=512, n_heads=8, n_layers=8,
     ).to(device)
 
-    model_mohaom = Spec2label(
-        n_encoder_inputs=8+8+3+2, n_outputs=2, 
-        channels=128, n_heads=8, n_layers=8,
-    ).to(device)
+    # model_mohaom = Spec2label(
+    #     n_encoder_inputs=8+8+3+2, n_outputs=2, 
+    #     channels=128, n_heads=8, n_layers=8,
+    # ).to(device)
 
     # model = Spec2label(
     #     n_encoder_inputs=8+8+3, n_decoder_inputs=8+8+3+2, n_outputs=2, channels=345, nhead=3
     #     ).to(device)
 
     # cost = torch.nn.GaussianNLLLoss(full=True, reduction='sum')
-    cost = torch.nn.MSELoss(reduction='sum')
+    cost = torch.nn.MSELoss()
 
-    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    optimizer = torch.optim.Adam(list(model_tefflogg.parameters()) + list(model_mohaom.parameters()), lr=1e-5)
+    optimizer = torch.optim.Adam(model_tefflogg.parameters(), lr=1e-2)
+    # optimizer = torch.optim.Adam(list(model_tefflogg.parameters()) + list(model_mohaom.parameters()), lr=1e-5)
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, patience=10, factor=0.1
@@ -65,11 +65,8 @@ if __name__ == "__main__":
     itr = 1
     num_iters  = 100
 
-
     # log_dir   = "/data/jdli/gaia/model/forcasting_1110A.log"
     model_dir = "/data/jdli/gaia/model/1115/"
-    
-
     # logger = TensorBoardLogger(
     #     save_dir=log_dir,
     # )
@@ -101,32 +98,28 @@ if __name__ == "__main__":
     def train_epoch(tr_loader):
         # model.train()
         model_tefflogg.train()
-        model_mohaom.train()
-
+        # model_mohaom.train()
+        total_loss = 0.
         start = time.time()
         for batch, data in enumerate(tr_loader):
-            total_loss = 0.
-
             # output = model(data['x'], data['y'])
-            tefflogg = model_tefflogg(data['x'])
-            mohaom = model_mohaom(torch.concat((data['x'], tefflogg.view(-1, 1, 2)), dim=2))
+            tefflogg = model_tefflogg(data['x']).view(-1,2)
+            # mohaom = model_mohaom(torch.concat((data['x'], tefflogg.view(-1, 1, 2)), dim=2))
             # loss = smape_loss(output.view(-1), data['y'].view(-1))
             # loss = cost(output, data['y'], data['e_y'])
-
-            output = torch.concat((tefflogg, mohaom), dim=1)
-            loss = cost(output.view(-1, 4), data['y'],)
+            # output = torch.concat((tefflogg, mohaom), dim=1)
+            # print(tefflogg.shape, data['y'][:,:2].shape)
+            loss = cost(tefflogg, data['y'][:,:2],)
             loss_value = loss.item()
 
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model_tefflogg.parameters(), 0.5)
-            torch.nn.utils.clip_grad_norm_(model_mohaom.parameters(), 0.5)
+            # torch.nn.utils.clip_grad_norm_(model_mohaom.parameters(), 0.5)
             optimizer.step()
+            total_loss+=loss_value
+            # del data, output
 
-            total_loss += loss_value
-            del data, output
-
-            # if itr%num_iters == 0:
         end = time.time()
 
         print(f"Epoch #%d tr loss:%.4f time:%.2f s"%(epoch, total_loss/(batch+1), (end-start)))
@@ -134,23 +127,21 @@ if __name__ == "__main__":
     
     def eval(val_loader):
         model_tefflogg.eval()
-        model_mohaom.eval()
+        # model_mohaom.eval()
         with torch.no_grad():
             total_val_loss = 0
             for bs, data in enumerate(val_loader):
                 # output = model(data['x'])
                 # loss = smape_loss(output.view(-1), data['y'].view(-1))
                 # loss = cost(output, data['y'], data['e_y'])
-                tefflogg = model_tefflogg(data['x'])
-                mohaom = model_mohaom(torch.concat((data['x'], tefflogg.view(-1, 1, 2)), dim=2))
+                tefflogg = model_tefflogg(data['x']).view(-1, 2)
+                # mohaom = model_mohaom(torch.concat((data['x'], tefflogg.view(-1, 1, 2)), dim=2))
                 # loss = smape_loss(output.view(-1), data['y'].view(-1))
                 # loss = cost(output, data['y'], data['e_y'])
-
-                output = torch.concat((tefflogg, mohaom), dim=1)
-                loss = cost(output.view(-1, 4), data['y'],)
+                # output = torch.concat((tefflogg, mohaom), dim=1)
+                loss = cost(tefflogg, data['y'][:,:2],)
                 total_val_loss+=loss.item()
-                del data, output
-
+                # del data, output
         print("val loss:%.4f"%(total_val_loss/(bs+1)))
 
 
@@ -162,8 +153,7 @@ if __name__ == "__main__":
 
         if epoch%50==0: 
             save_point_tefflogg =  "sp2tefflogg_mse_%s_ep%d.pt"%(tr_select, epoch)
-            save_point_mohaom   =  "sp2mohaom_mse_%s_ep%d.pt"%(tr_select, epoch)
+            # save_point_mohaom   =  "sp2mohaom_mse_%s_ep%d.pt"%(tr_select, epoch)
 
             torch.save(model_tefflogg.state_dict(), model_dir+save_point_tefflogg)
-            torch.save(model_mohaom.state_dict(), model_dir+save_point_mohaom)
-            
+            # torch.save(model_mohaom.state_dict(), model_dir+save_point_mohaom)
