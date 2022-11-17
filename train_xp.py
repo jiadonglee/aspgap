@@ -1,6 +1,3 @@
-# from cmath import log
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
 # import numpy as np
 # %load_ext autoreload
 # %autoreload 2
@@ -14,7 +11,7 @@ from data import GaiaXPlabel_cont
 if __name__ == "__main__":
     #=========================Data loading ================================
     data_dir = "/data/jdli/gaia/"
-    tr_file = "ap17_xpcont_cut.npy"
+    tr_file = "ap17_xpcont_trsnr300.npy"
 
     device = torch.device('cuda:0')
     TOTAL_NUM = 6000
@@ -28,6 +25,7 @@ if __name__ == "__main__":
     B_size = len(gdata) - A_size - val_size
 
     A_dataset, B_dataset, val_dataset = torch.utils.data.random_split(gdata, [A_size, B_size, val_size], generator=torch.Generator().manual_seed(42))
+
     print(len(A_dataset), len(B_dataset), len(val_dataset))
 
     A_loader = DataLoader(A_dataset, batch_size=BATCH_SIZE)
@@ -52,10 +50,10 @@ if __name__ == "__main__":
     #     ).to(device)
 
     # cost = torch.nn.GaussianNLLLoss(full=True, reduction='sum')
-    cost = torch.nn.MSELoss(reduction='sum')
+    cost = torch.nn.MSELoss(reduction='mean')
 
     # optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    optimizer = torch.optim.Adam(list(model_tefflogg.parameters()) + list(model_mohaom.parameters()), lr=1e-5)
+    optimizer = torch.optim.Adam(list(model_tefflogg.parameters()) + list(model_mohaom.parameters()), lr=1e-3)
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, patience=10, factor=0.1
@@ -63,25 +61,12 @@ if __name__ == "__main__":
     
     # num_batches = train_size//BATCH_SIZE
     itr = 1
-    num_iters  = 100
-
+    num_iters=100
 
     # log_dir   = "/data/jdli/gaia/model/forcasting_1110A.log"
-    model_dir = "/data/jdli/gaia/model/1115/"
+    model_dir = "/data/jdli/gaia/model/1116/"
     
-
-    # logger = TensorBoardLogger(
-    #     save_dir=log_dir,
-    # )
-
-    checkpoint_callback = ModelCheckpoint(
-        monitor="valid_loss",
-        mode="min",
-        dirpath=model_dir,
-        filename="ts",
-    )
-    
-    tr_select = "A"
+    tr_select = "B"
 
     if tr_select=="A":
         tr_loader = A_loader
@@ -90,7 +75,7 @@ if __name__ == "__main__":
 
     elif tr_select=="B":
         tr_loader = B_loader
-        # check_point = "model/1115/enc_GXPcont_221110_NGlll_B_ep300.pt"        
+        # check_point = "model/1115/enc_GXPcont_221110_NGlll_B_ep300.pt"
 
     # print("Loading checkpint %s"%(check_point))
     # model.load_state_dict(torch.load(model_dir+check_point))
@@ -138,9 +123,7 @@ if __name__ == "__main__":
         with torch.no_grad():
             total_val_loss = 0
             for bs, data in enumerate(val_loader):
-                # output = model(data['x'])
-                # loss = smape_loss(output.view(-1), data['y'].view(-1))
-                # loss = cost(output, data['y'], data['e_y'])
+
                 tefflogg = model_tefflogg(data['x'])
                 mohaom = model_mohaom(torch.concat((data['x'], tefflogg.view(-1, 1, 2)), dim=2))
                 # loss = smape_loss(output.view(-1), data['y'].view(-1))

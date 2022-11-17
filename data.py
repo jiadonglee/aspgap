@@ -293,6 +293,8 @@ class GaiaXPlabel_cont():
         self.total_num = total_num
         self.part_train = part_train
         self.device = device
+        self.teff_max = self.df['TEFF'].max()
+        self.J_max  = self.df['J'].max()
     
     def __len__(self) -> int:
         if self.part_train:
@@ -305,7 +307,7 @@ class GaiaXPlabel_cont():
 
         coeffs = np.hstack([self.bp[idx][:8], self.rp[idx][:8]])
         coeffs[np.isnan(coeffs)] = np.mean(coeffs)
-        photo = self.df[['J','H','K']].values[idx]
+        photo = self.df[['J','H','K']].values[idx]/self.J_max
         
         coeffs = torch.tensor(
             np.hstack([coeffs, photo]).reshape(1,-1).astype(np.float32)
@@ -314,8 +316,8 @@ class GaiaXPlabel_cont():
         output = self.df[['TEFF', 'LOGG', 'M_H','ALPHA_M']].values[idx]
         e_output = self.df[['TEFF_ERR', 'LOGG_ERR', 'M_H_ERR', 'ALPHA_M_ERR']].values[idx]
         
-        e_output[0]= np.sqrt(np.square(e_output[0]/(output[0]*np.log(10))))
-        output[0]  = np.log10(output[0])
+        e_output[0]= e_output[0]/self.teff_max
+        output[0]  = output[0]/self.teff_max
 
         output   = torch.tensor(output.reshape(-1).astype(np.float32))
         e_output = torch.tensor(e_output.reshape(-1).astype(np.float32))
