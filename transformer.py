@@ -115,20 +115,11 @@ class TransformerReg(nn.Module):
     """
     A detailed description of the code can be found in my article here:
     https://towardsdatascience.com/how-to-make-a-pytorch-transformer-for-time-series-forecasting-69e073d4061e
-    [1] Wu, N., Green, B., Ben, X., O'banion, S. (2020). 
-    [2] Vaswani, A. et al. (2017)
     """
 
     def __init__(
-        self,
-        input_size: int, 
-        batch_first: bool=True, out_seq_len:int=58,
-        enc_seq_len:int=304, dec_seq_len: int=2,
-        dim_val:int=512, n_encoder_layers:int=4, n_decoder_layers:int=4, n_heads:int=8,
-        dropout_encoder: float=0.2, dropout_decoder: float=0.2, dropout_pos_enc: float=0.1, 
-        num_predicted_features: int=1, max_seq_len: int=8 ,
-        dim_feedforward_encoder: int=2048,
-        dim_feedforward_decoder: int=2048,
+        self, input_size: int, batch_first: bool=True, out_seq_len:int=58, enc_seq_len:int=304, dec_seq_len: int=2, dim_val:int=512, n_encoder_layers:int=4, n_decoder_layers:int=4, n_heads:int=8,
+        dropout_encoder: float=0.2, dropout_decoder: float=0.2, dropout_pos_enc: float=0.1, num_predicted_features: int=1, max_seq_len: int=8 , dim_feedforward_encoder: int=2048, dim_feedforward_decoder: int=2048,
         ): 
         """
         Args:
@@ -169,27 +160,37 @@ class TransformerReg(nn.Module):
         # The encoder layer used in the paper is identical to the one used by
         # Vaswani et al (2017) on which the PyTorch module is based.
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=dim_val, nhead=n_heads, dim_feedforward=dim_feedforward_encoder, dropout=dropout_encoder, batch_first=batch_first
+            d_model=dim_val, nhead=n_heads, 
+            dim_feedforward=dim_feedforward_encoder, dropout=dropout_encoder,
+            batch_first=batch_first
         )
         self.encoder = nn.TransformerEncoder(
-            encoder_layer=encoder_layer, num_layers=n_encoder_layers, norm=None
+            encoder_layer=encoder_layer, num_layers=n_encoder_layers,
         )
 
-        decoder_layer = nn.TransformerDecoderLayer(d_model=dim_val, nhead=n_heads,
-                                                   dim_feedforward=dim_feedforward_decoder,
-                                                   dropout=dropout_decoder, batch_first=batch_first)
-        self.decoder = nn.TransformerDecoder(decoder_layer=decoder_layer, num_layers=n_decoder_layers, norm=None)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=dim_val, nhead=n_heads,
+            dim_feedforward=dim_feedforward_decoder,
+            dropout=dropout_decoder, batch_first=batch_first
+        )
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layer, num_layers=n_decoder_layers, 
+        )
 
-    def forward(self, src: Tensor, tgt: Tensor=None, src_mask: Tensor=None, tgt_mask: Tensor=None) -> Tensor:
+    def forward(self, src:Tensor, tgt:Tensor=None, src_mask:Tensor=None, tgt_mask: Tensor=None)->Tensor:
+        
         """
         Returns a tensor of shape:
-        [target_sequence_length, batch_size, num_predicted_features]
         """
         src = self.encoder_input_layer(src) 
         src = self.positional_encoding_layer(src)
         src = self.encoder(src) # src shape: [batch_size, enc_seq_len, dim_val]
+        
         decoder_output = self.decoder_input_layer(tgt) # src shape: [target sequence length, batch_size, dim_val] regardless of number of input features
-        decoder_output = self.decoder(tgt=decoder_output, memory=src, tgt_mask=tgt_mask, memory_mask=src_mask)
+        decoder_output = self.decoder(
+            tgt=decoder_output, memory=src, 
+            tgt_mask=tgt_mask, memory_mask=src_mask,
+        )
         decoder_output = self.linear_mapping(decoder_output) # shape [batch_size, target seq len]
         return decoder_output
 
@@ -200,7 +201,7 @@ class PositionalEncoding(nn.Module):
         super(PositionalEncoding, self).__init__()       
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        div_term = torch.exp(torch.arange(0, d_model, 2).float()*(-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0).transpose(0, 1)
@@ -250,9 +251,14 @@ class TransAm(nn.Module):
         return mask
 
 
+    
+    
 def smape_loss(y_pred, target):
     loss = 2 * (y_pred - target).abs() / (y_pred.abs() + target.abs() + 1e-8)
     return loss.mean()
+
+
+
 
 def gen_trg_mask(length, device):
     mask = torch.tril(torch.ones(length, length, device=device)) == 1
@@ -263,6 +269,9 @@ def gen_trg_mask(length, device):
         .masked_fill(mask == 1, float(0.0))
     )
     return mask
+
+
+
 
 class TimeSeriesForcasting(nn.Module):
     def __init__(
@@ -409,3 +418,52 @@ class TimeSeriesForcasting(nn.Module):
             "lr_scheduler": scheduler,
             "monitor": "valid_loss",
         }
+
+def infer(model: nn.Module, src: torch.Tensor, forecast_window:int,  device,) -> torch.Tensor:
+    
+    target_seq_dim = 1
+    tgt = src[:,-1,0].unsqueeze(0).unsqueeze(-1) # [bs, 1, 1]
+
+    # Iteratively concatenate tgt with the first element in the prediction
+    for _ in range(forecast_window-1):
+        
+        dim_a = tgt.shape[1] #1,2,3,.. n
+        dim_b = src.shape[1] #30
+        
+        src_mask = generate_square_subsequent_mask(dim1=dim_a, dim2=dim_b).to(device)
+        tgt_mask = generate_square_subsequent_mask(dim1=dim_a, dim2=dim_a).to(device)
+        
+        prediction = model(src, tgt, src_mask, tgt_mask)
+
+        # Obtain the predicted value at t+1 where t is the last step 
+        # represented in tgt
+        last_predicted_value = prediction[:,-1,:].view(-1,1,1) #[bs, 1]
+        # Reshape from [batch_size, 1] --> [1, batch_size, 1]
+        # last_predicted_value = last_predicted_value
+        
+        print(tgt.size())
+        # Detach the predicted element from the graph and concatenate with 
+        # tgt in dimension 1 or 0
+        tgt = torch.cat((tgt, last_predicted_value.detach()), target_seq_dim)
+    
+    src_mask = generate_square_subsequent_mask(dim1=4, dim2=30).to(device)
+    tgt_mask = generate_square_subsequent_mask(dim1=4, dim2=4).to(device)
+    
+    # Make final prediction
+    return model(src, tgt, src_mask, tgt_mask)
+    
+def generate_square_subsequent_mask(dim1: int, dim2: int) -> Tensor:
+    """
+    Generates an upper-triangular matrix of -inf, with zeros on diag.
+    Modified from: 
+    https://pytorch.org/tutorials/beginner/transformer_tutorial.html
+    Args:
+        dim1: int, for both src and tgt masking, this must be target sequence
+              length
+        dim2: int, for src masking this must be encoder sequence length (i.e. 
+              the length of the input sequence to the model), 
+              and for tgt masking, this must be target sequence length 
+    Return:
+        A Tensor of shape [dim1, dim2]
+    """
+    return torch.triu(torch.ones(dim1, dim2) * float('-inf'), diagonal=1)
