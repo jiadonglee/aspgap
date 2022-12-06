@@ -4,8 +4,8 @@
 import time
 import torch
 from torch.utils.data import DataLoader
-from model import Spec2HRd
-from data import GaiaXPlabel_cont_norm
+from model import Spec2HRd, Spec2HRd_err
+from data import GaiaXP_55coefs_5label_cont_ANDnorm
 
 
 if __name__ == "__main__":
@@ -17,9 +17,10 @@ if __name__ == "__main__":
     TOTAL_NUM = 6000
     BATCH_SIZE = 1024
 
-    gdata  = GaiaXPlabel_cont_norm(
+    gdata  = GaiaXP_55coefs_5label_cont_ANDnorm(
         data_dir+tr_file, 
-        total_num=TOTAL_NUM, part_train=False, 
+        total_num=TOTAL_NUM, 
+        part_train=False, 
         device=device
     )
 
@@ -33,25 +34,25 @@ if __name__ == "__main__":
 
     A_loader = DataLoader(A_dataset, batch_size=BATCH_SIZE)
     B_loader = DataLoader(B_dataset, batch_size=BATCH_SIZE)
-    val_loader = DataLoader(val_dataset, batch_size=1024)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
 
     ##==================Model parameters============================
     ##==============================================================
     #===============================================================
-    INPUT_LEN = 30
+    INPUT_LEN = 55*2+3
 
     model = Spec2HRd(
         n_encoder_inputs=INPUT_LEN, n_decoder_inputs=INPUT_LEN+2,
         n_outputs=2, channels=512, n_heads=8, n_layers=8,
     ).to(device)
 
-    # cost = torch.nn.GaussianNLLLoss(full=True, reduction='sum')
-    cost = torch.nn.MSELoss(reduction='mean')
+    cost = torch.nn.GaussianNLLLoss(full=True, reduction='mean')
+    # cost = torch.nn.MSELoss(reduction='mean')
 
     # optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=1e-3, weight_decay=1e-5
+        lr=1e-4, weight_decay=1e-6
     )
     # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.1)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
@@ -59,19 +60,18 @@ if __name__ == "__main__":
     num_iters=100
 
     tr_select = "A"
-    model_dir = "/data/jdli/gaia/model/1119/" + tr_select
+    model_dir = "/data/jdli/gaia/model/1130/" + tr_select
 
     if tr_select=="A":
         tr_loader = A_loader
+        check_point = model_dir +"/sp2_4labels_mse_A_ep0.pt"
 
     elif tr_select=="B":
         tr_loader = B_loader
-
-    
-    # check_point = "/data/jdli/gaia/model/1119/B/sp2_4labels_mse_B_ep23.pt"
-    # print("Loading checkpoint %s"%(check_point))
+        # check_point = "/data/jdli/gaia/model/1119/B/sp2_4labels_mse_B_ep85.pt"
     print("===================================")
-    # model.load_state_dict(torch.load(check_point))
+    print("Loading checkpoint %s"%(check_point))
+    model.load_state_dict(torch.load(check_point))
 
     print("Traing %s begin"%tr_select)
 
@@ -83,8 +83,10 @@ if __name__ == "__main__":
 
         for batch, data in enumerate(tr_loader):
 
-            output = model(data['x'])
-            loss = cost(output.view(-1, 4), data['y'],)
+            output = model(data['x']).view(-1,5)
+            # output = model(data['x']).view(-1,10)
+            loss = cost(output, data['y'], data['e_y'])
+            # loss = cost(output[:,:5], data['y'], torch.sqrt(torch.square(data['e_y'])+torch.square(output[:,5:])))
             loss_value = loss.item()
 
             optimizer.zero_grad()
@@ -103,11 +105,12 @@ if __name__ == "__main__":
         total_val_loss=0
         with torch.no_grad():
             for bs, data in enumerate(val_loader):
-
-               output = model(data['x'])
-               loss = cost(output.view(-1, 4), data['y'],)
-               total_val_loss+=loss.item()
-               del data, output
+                # output = model(data['x']).view(-1,10)
+                output = model(data['x']).view(-1,5)
+                loss = cost(output.view(-1,5), data['y'], data['e_y'])
+                # loss = cost(output[:,:5], data['y'], torch.sqrt(torch.square(data['e_y'])+torch.square(output[:,5:])))
+                total_val_loss+=loss.item()
+                del data, output
 
         print("val loss:%.4f"%(total_val_loss/(bs+1e-5)))
 
@@ -120,5 +123,5 @@ if __name__ == "__main__":
         if epoch%50==0: 
             save_point =  "/sp2_4labels_mse_%s_ep%d.pt"%(tr_select, epoch)
             torch.save(model.state_dict(), model_dir+save_point)
+
     torch.cuda.empty_cache()
-            
