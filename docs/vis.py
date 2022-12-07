@@ -1,14 +1,16 @@
 import pandas as pd
 import numpy as np
+import cmasher as cmr
+from matplotlib import colors
 
-def draw_compare(ax, pred, true, xrange=[-2, 0.5],):
+def draw_compare(ax, pred, true, xrange=[-2, 0.5], cmap='cmr.dusk'):
     
     xx = np.linspace(xrange[0], xrange[1])
     
     norm_res = pred-true
     
     ax.plot(xx, xx, ls='--', lw=5, c='k', zorder=5)   
-    ax.hist2d(true,pred, bins=100, cmap=cmap, zorder=4, norm=LogNorm())
+    ax.hist2d(true,pred, bins=100, cmap=cmap, zorder=4, norm=colors.LogNorm())
     ax.set_xlim(xrange);
     ax.set_ylim(xrange);
     return ax

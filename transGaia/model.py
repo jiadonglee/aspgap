@@ -96,8 +96,7 @@ class Spec2label(nn.Module):
             return tgt, attention_maps
         else:
             return tgt
-
-
+            
 
 class Spec2HRd(nn.Module):
     def __init__(

@@ -596,53 +596,28 @@ class GaiaXP_55coefs_5label_cont_ANDnorm():
         return {'x':coeffs, 'y':output, 'e_y':e_output, 'id':self.df['source_id'].values[idx]}
 
 
-class GaiaXP_55coefs_alpha():
+class GXP_5lb():
     """Gaia DR3 XP continuous spectrum to stellar labels instance
     """
     def __init__(self, npydata, total_num=6000, part_train=True, device=torch.device('cpu')) -> None:
         self.data = np.load(npydata, allow_pickle=True).item()
-        self.bp = self.data['lgnorm_bp_andrae']
-        self.rp = self.data['lgnorm_rp_andrae']
-        # self.bp = self.data['norm_bp_coef']
-        # self.rp = self.data['norm_rp_coef']
-        self.df = self.data['df']
+        self.xp = self.data['norm_xp']
+        self.labels = self.data['labels']
+        self.e_labels = self.data['e_labels']
+        self.source_id = self.data['source_id']
         self.total_num = total_num
         self.part_train = part_train
         self.device = device
-        self.J_max  = self.df['J'].max()
     
     def __len__(self) -> int:
         if self.part_train:
             num_sets = self.total_num
         else:
-            num_sets = len(self.df)
+            num_sets = len(self.labels)
         return num_sets
 
     def __getitem__(self, idx: int):
-
-        coeffs = np.hstack([self.bp[idx], self.rp[idx]])
-        coeffs[np.isnan(coeffs)] = np.mean(coeffs)
-        photo = self.df[['J','H','K']].values[idx]/self.J_max
-        
-        coeffs = torch.tensor(
-            np.hstack([coeffs, photo]).reshape(1,-1).astype(np.float32)
-        ).to(self.device)
-
-        output = self.df['ALPHA_M'].values[idx]
-        e_output = self.df['ALPHA_M_ERR'].values[idx]
-
-        """
-        normalize stellar labels
-        raw: 
-        [a/M]    [-0.2-0.4] (0.6)
-        after normalization:
-        ([a/M]) => (30)
-        """
-        label_norm = torch.tensor(np.array([50.]).astype(np.float32))
-        output   = torch.tensor(output.reshape(-1).astype(np.float32)).to(self.device)
-        e_output = torch.tensor(e_output.reshape(-1).astype(np.float32)).to(self.device)
-
-        output   *= label_norm.to(self.device)
-        e_output *= label_norm.to(self.device)
-
-        return {'x':coeffs, 'y':output, 'e_y':e_output, 'id':self.df['source_id'].values[idx]}
+        x = torch.tensor(self.xp[idx].astype(np.float32)).to(self.device)
+        y = torch.tensor(self.labels[idx].astype(np.float32)).to(self.device)
+        e_y = torch.tensor(self.e_labels[idx].astype(np.float32)).to(self.device)
+        return {'x':x, 'y':y, 'e_y':e_y, 'id':self.source_id[idx]}
