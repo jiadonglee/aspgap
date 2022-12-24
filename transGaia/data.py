@@ -578,11 +578,11 @@ class GaiaXP_55coefs_5label_cont_ANDnorm():
         """
         normalize stellar labels
         raw: 
-        Teff [3000-6500] (3500), Logg [0-5] (5), 
+        Teff [3000-6500] (3500), 
+        Logg [0-5] (5), 
         parallax [-0.1-2] (2)
         [M/H]    [-2-0.5] (2.5)
         [a/M]    [-0.2-0.4] (0.6)
-
         after normalization:
         (Teff, Logg, [M/H], [a/M]) => (35, 25, 30, 25, 30)
         """

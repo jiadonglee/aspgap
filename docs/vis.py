@@ -2,25 +2,128 @@ import pandas as pd
 import numpy as np
 import cmasher as cmr
 from matplotlib import colors
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-def draw_compare(ax, pred, true, xrange=[-2, 0.5], cmap='cmr.dusk'):
+def rmse(res):
+    return np.sqrt(np.mean(res**2))
+
+def mae(res):
+    return np.median(np.abs(res))
+
+def draw_compare(ax, true, pred, xrange=[-2, 0.5], C=None, bins=100, cmap='cmr.dusk_r', **kwargs):
     
     xx = np.linspace(xrange[0], xrange[1])
     
-    norm_res = pred-true
+    res = pred-true
+    ax.plot(xx, xx, ls='--', lw=5, c='k', zorder=5)
     
-    ax.plot(xx, xx, ls='--', lw=5, c='k', zorder=5)   
-    ax.hist2d(true,pred, bins=100, cmap=cmap, zorder=4, norm=colors.LogNorm())
+    # if kwargs['vmin'] is not None:
+    #     norm = colors.LogNorm(vmin=kwargs['vmin'], vmax=kwargs['vmax'])
+    # else:
+    norm = colors.LogNorm()
+        
+    img = ax.hexbin(true,pred, C=C, bins=bins, cmap=cmap, zorder=4, 
+                    norm=norm)
     ax.set_xlim(xrange);
     ax.set_ylim(xrange);
-    return ax
+    
+    ax.text(0.6, 0.2, "RMSE = %.2f"%(rmse(true-pred)),
+            transform=ax.transAxes, zorder=3)
+    ax.text(0.6, 0.1, " MAE  = %.2f"%(mae(true-pred)),
+            transform=ax.transAxes, zorder=3)
 
-def draw_res(ax, true, res, xrange=[-2, 0.5], yrange=[-0.5, 0.5]):
-    ax.hist2d(true, res, bins=100, cmap=cmap, zorder=4, norm=LogNorm())
+    divider = make_axes_locatable(ax)
+    ax2 = divider.append_axes("bottom", size="33%", pad=0)
+
+    ax.figure.add_axes(ax2)
+    ax2.hist2d(true, res, cmap=cmap, bins=bins, zorder=5, norm=colors.LogNorm())
+    ax2.axhline(y=0, c='k', zorder=6, lw=5, ls="--")
+    ax2.axhline(y=np.percentile(res, 14), c='grey', zorder=6, lw=3, ls='--')
+    ax2.axhline(y=np.percentile(res, 86), c='grey', zorder=6, lw=3, ls='--')
+    ax2.set_xlabel(r"APOGEE");
+    ax2.set_ylim(xrange);
+    ax2.set_xlim(xrange);
+    ax.set_xticks([]);
+    
+    if C is None:
+        return ax, ax2
+    else:
+        return ax, ax2, img
+    
+    
+def compare_scatter(ax, pred, true, xrange=[-2, 0.5], C=None, cmap='cmr.dusk_r', **kwargs):
+    
+    xx = np.linspace(xrange[0], xrange[1])
+    res = pred-true
+    ax.plot(xx, xx, ls='--', lw=5, c='k', zorder=5)
+    
+    if kwargs['vmin'] is not None:
+        # norm = colors.LogNorm(vmin=kwargs['vmin'], vmax=kwargs['vmax'])
+        norm = colors.Normalize(vmin=kwargs['vmin'], vmax=kwargs['vmax'])
+        # norm = colors.LogNorm()
+        
+    img = ax.scatter(true,pred, c=C, cmap=cmap, s=1, zorder=4, norm=norm)
     ax.set_xlim(xrange);
-    ax.set_ylim(yrange);
-    ax.axhline(y=0, c='k', zorder=6, lw=5, ls="--")
-    return ax
+    ax.set_ylim(xrange);
+    
+    ax.text(0.6, 0.2, "RMSE = %.2f"%(rmse(true-pred)),
+            transform=ax.transAxes, zorder=3)
+    ax.text(0.6, 0.1, " MAE  = %.2f"%(mae(true-pred)),
+            transform=ax.transAxes, zorder=3)
+
+    divider = make_axes_locatable(ax)
+    ax2 = divider.append_axes("bottom", size="33%", pad=0)
+
+    ax.figure.add_axes(ax2)
+    ax2.scatter(true, res, s=1, cmap=cmap, zorder=5, c=C, norm=norm)
+    ax2.axhline(y=0, c='k', zorder=6, lw=5, ls="--")
+    ax2.axhline(y=np.percentile(res, 14), c='grey', zorder=6, lw=3, ls='--')
+    ax2.axhline(y=np.percentile(res, 86), c='grey', zorder=6, lw=3, ls='--')
+    ax2.set_xlabel(r"APOGEE");
+    ax2.set_ylim(xrange);
+    ax2.set_xlim(xrange);
+    ax.set_xticks([]);
+    
+    if C is None:
+        return ax, ax2
+    else:
+        return ax, ax2, img
+
+
+def draw_hist2d(ax, true, pred, xrange=[-2, 0.5], C=None, bins=100, cmap='cmr.dusk_r', **kwargs):
+    
+    xx = np.linspace(xrange[0], xrange[1])
+    res = pred-true
+    ax.plot(xx, xx, ls='--', lw=5, c='k', zorder=5)
+    
+    norm = colors.LogNorm()
+        
+    img = ax.hist2d(true,pred, bins=bins, cmap=cmap, zorder=4, norm=norm)
+    ax.set_xlim(xrange);
+    ax.set_ylim(xrange);
+    ax.text(0.6, 0.2, "RMSE = %.2f"%(rmse(true-pred)),
+            transform=ax.transAxes, zorder=3)
+    ax.text(0.6, 0.1, " MAE  = %.2f"%(mae(true-pred)),
+            transform=ax.transAxes, zorder=3)
+
+    divider = make_axes_locatable(ax)
+    ax2 = divider.append_axes("bottom", size="33%", pad=0)
+
+    ax.figure.add_axes(ax2)
+    ax2.hist2d(true, res, cmap=cmap, bins=bins, zorder=5, norm=colors.LogNorm())
+    ax2.axhline(y=0, c='k', zorder=6, lw=5, ls="--")
+    ax2.axhline(y=np.percentile(res, 14), c='grey', zorder=6, lw=3, ls='--')
+    ax2.axhline(y=np.percentile(res, 86), c='grey', zorder=6, lw=3, ls='--')
+    ax2.set_xlabel(r"APOGEE");
+    ax2.set_ylim(xrange);
+    ax2.set_xlim(xrange);
+    ax.set_xticks([]);
+    
+    if C is None:
+        return ax, ax2
+    else:
+        return ax, ax2, img
 
 def draw_meddiagram(ax, df, xlabel, ylabel, xedges, yedges,
                     color_name='MH', vrange=[-2, 0.5],

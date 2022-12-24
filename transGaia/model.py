@@ -163,6 +163,7 @@ class Spec2HRd(nn.Module):
         src = self.encoder(src) + src_start
         return src
 
+
     def decode_src(self, src):
         if src.size()[2] == self.n_decoder_inputs:
             src_start = self.output_projection_a(src)
@@ -201,7 +202,6 @@ class Spec2HRd(nn.Module):
         
         if self.mode=='train':
             return torch.concat((tgt_a, tgt_b, tgt_c), dim=1).view(-1, 5)
-        
         else:
             return out
 
