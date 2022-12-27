@@ -584,7 +584,7 @@ class GaiaXP_55coefs_5label_cont_ANDnorm():
         [M/H]    [-2-0.5] (2.5)
         [a/M]    [-0.2-0.4] (0.6)
         after normalization:
-        (Teff, Logg, [M/H], [a/M]) => (35, 25, 30, 25, 30)
+        (Teff, Logg, parallax, [M/H], [a/M]) => (35, 25, 30, 25, 30)
         """
         label_norm = torch.tensor(np.array([1e-2, 5., 15., 10., 50.]).astype(np.float32))
         output   = torch.tensor(output.reshape(-1).astype(np.float32)).to(self.device)
@@ -600,6 +600,7 @@ class GXP_5lb():
     """Gaia DR3 XP continuous spectrum to stellar labels instance
     """
     def __init__(self, npydata, total_num=6000, part_train=True, device=torch.device('cpu')) -> None:
+        
         self.data = np.load(npydata, allow_pickle=True).item()
         self.xp = self.data['norm_xp']
         self.labels = self.data['labels']

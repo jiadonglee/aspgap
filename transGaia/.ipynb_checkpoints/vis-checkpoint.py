@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import cmasher as cmr
 from matplotlib import colors
+import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
@@ -23,8 +24,8 @@ def draw_compare(ax, true, pred, xrange=[-2, 0.5], C=None, bins=100, cmap='cmr.d
     # else:
     norm = colors.LogNorm()
         
-    img = ax.hexbin(true,pred, C=C, bins=bins, cmap=cmap, zorder=4, 
-                    norm=norm)
+    # img = ax.hexbin(true,pred, C=C, bins=bins, cmap=cmap, zorder=4, norm=norm)
+    img = ax.hist2d(true, pred, bins=bins, cmap=cmap, zorder=4, norm=norm)
     ax.set_xlim(xrange);
     ax.set_ylim(xrange);
     
@@ -142,3 +143,22 @@ def draw_meddiagram(ax, df, xlabel, ylabel, xedges, yedges,
     img = ax.pcolormesh(X, Y, H, cmap=color_map, vmin=vrange[0], vmax=vrange[1])
     
     return ax, X, Y, H
+
+
+def draw_attention(attn, ax, vmax=0.03, cmap='cmr.eclipse'):
+    num_coeff_grid = np.linspace(1,114,114)
+    xx, yy = np.meshgrid(num_coeff_grid, num_coeff_grid)
+    img = ax.pcolormesh(
+        xx, yy, attn, 
+        norm=colors.Normalize(vmin=0, vmax=vmax), 
+        cmap=cmap
+    )
+    # ax.set_xscale('log')
+    ax.set_xticks([1, 10, 55, 110]);
+    ax.set_xticklabels([1, 10, 55, 110]);
+
+    clb = plt.colorbar(img, ax=ax, extend='max');
+    clb.set_label(r"Weight", rotation=0, y=1.15, labelpad=-35)
+
+    ax.set_xlabel("XP coefficient index + Photometric");
+    return ax
