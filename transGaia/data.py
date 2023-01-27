@@ -351,6 +351,7 @@ class GaiaXPlabel_cont_infer():
     """Gaia DR3 XP continuous spectrum to stellar labels instance
     """
     def __init__(self, npydata, total_num=6000, part_train=True, device=torch.device('cpu')) -> None:
+        
         self.data = np.load(npydata, allow_pickle=True).item()
         self.bp = self.data['norm_bp_coef']
         self.rp = self.data['norm_rp_coef']
@@ -599,9 +600,9 @@ class GaiaXP_55coefs_5label_cont_ANDnorm():
 class GXP_5lb():
     """Gaia DR3 XP continuous spectrum to stellar labels instance
     """
-    def __init__(self, npydata, total_num=6000, part_train=True, device=torch.device('cpu')) -> None:
+    def __init__(self, data, total_num=6000, part_train=True, device=torch.device('cpu')) -> None:
         
-        self.data = np.load(npydata, allow_pickle=True).item()
+        self.data = np.load(data, allow_pickle=True).item()
         self.xp = self.data['norm_xp']
         self.labels = self.data['labels']
         self.e_labels = self.data['e_labels']
@@ -622,3 +623,26 @@ class GXP_5lb():
         y = torch.tensor(self.labels[idx].astype(np.float32)).to(self.device)
         e_y = torch.tensor(self.e_labels[idx].astype(np.float32)).to(self.device)
         return {'x':x, 'y':y, 'e_y':e_y, 'id':self.source_id[idx]}
+
+
+class GXP_5lb_infer():
+    """Gaia DR3 XP continuous spectrum to stellar labels instance
+    """
+    def __init__(self, data, device=torch.device('cpu')) -> None:
+        
+        if isinstance(data, str):
+            self.data = np.load(data, allow_pickle=True).item()
+        else:
+            self.data = data
+
+        self.xp = self.data['norm_xp']
+        self.source_id = self.data['source_id']
+        self.device = device
+    
+    def __len__(self) -> int:
+        num_sets = len(self.source_id)
+        return num_sets
+
+    def __getitem__(self, idx: int):
+        x = torch.tensor(self.xp[idx].astype(np.float32)).to(self.device)
+        return {'x':x, 'id':self.source_id[idx]}

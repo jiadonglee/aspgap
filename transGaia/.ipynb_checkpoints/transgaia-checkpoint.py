@@ -41,6 +41,7 @@ class PositionalEncoding(nn.Module):
         return self.dropout(pos).permute(1,0,2)
 
 
+
 class DataEmbedding(nn.Module):
     def __init__(self, c_in, d_model, dropout=0.1):
         super(DataEmbedding, self).__init__()
@@ -82,13 +83,15 @@ class Spec2label(nn.Module):
 
 
     def forward(self, x):
-        src = self.enc_embedding(x.view(-1, self.n_encoder_inputs, self.channels)) # (bs, n_enc, dim)
+        src = self.enc_embedding(x.view(-1, self.n_encoder_inputs, 1)) # (bs, n_enc, dim)
         src = self.encoder(src) # (bs, n_enc, dim)
+        src_enc = src
         
         if self.attn:
             attention_maps = []
             for l in self.encoder.layers:
                 attention_maps.append(l.self_attn(src, src, src)[1])
+
         # src = src.view(-1, self.channels*self.n_encoder_inputs) # (bs, 512*113)
         src = torch.flatten(src, start_dim=1) #(bs, 512*113)
         src = F.relu(self.fc1(src)) # (bs, 1024)
@@ -97,6 +100,73 @@ class Spec2label(nn.Module):
         tgt = self.do(src)
 
         if self.attn:
-            return tgt, attention_maps
+            return tgt, attention_maps, src_enc
+        else:
+            return tgt
+
+
+
+
+class xp2label(nn.Module):
+    def __init__(self, n_encoder_inputs, n_outputs, channels=64,
+        n_heads=8, n_layers=8, dropout=0.2, attn=False):
+        super().__init__()
+
+        self.channels = channels
+        self.n_outputs = n_outputs
+        self.dropout = dropout
+        self.input_pos_embedding  = torch.nn.Embedding(128, embedding_dim=channels)
+        self.attn = attn
+        self.n_enc = n_encoder_inputs
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=channels, nhead=n_heads,
+            dropout=self.dropout, dim_feedforward=4*channels, batch_first=True
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.input_projection = nn.Linear(1, channels)
+        # self.output_projection = Linear(n_decoder_inputs, channels)
+        # self.linear = Linear(channels, 2)
+        self.fc1 = nn.Linear(channels*n_encoder_inputs, 1024)
+        self.fc2 = nn.Linear(1024, 64)
+        self.fc3 = nn.Linear(64, n_outputs)
+        self.do = nn.Dropout(p=self.dropout)
+
+    def encode_src(self, src):
+        src_start = self.input_projection(src)
+        in_sequence_len, batch_size = src_start.size(1), src_start.size(0)
+        pos_encoder = (
+            torch.arange(0, in_sequence_len, device=src.device)
+            .unsqueeze(0).repeat(batch_size, 1)
+        )
+        pos_encoder = self.input_pos_embedding(pos_encoder)
+        src = src_start + pos_encoder
+
+        if self.attn:
+            attention_maps = []
+            for l in self.encoder.layers:
+                attention_maps.append(l.self_attn(src, src, src)[1])
+            src = self.encoder(src)
+            return src, attention_maps
+        else:
+            src = self.encoder(src)
+            return src
+
+    def forward(self, x):
+        src = x.view(-1, self.n_enc, 1)
+        if self.attn:
+            src, attention_maps = self.encode_src(src) # (1, bs, 512)
+        else:
+            src = self.encode_src(src)
+            
+        src_enc = src
+    
+        src = torch.flatten(src, start_dim=1)
+        src = self.do(src)
+        src = F.relu(self.fc1(src))
+        src = F.relu(self.fc2(src))
+        tgt = F.relu(self.fc3(src)) # (bs, 1)
+        
+        if self.attn:
+            return tgt, attention_maps, src_enc
         else:
             return tgt

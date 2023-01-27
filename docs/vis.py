@@ -102,9 +102,9 @@ def draw_hist2d(ax, true, pred, xrange=[-2, 0.5], C=None, bins=100, cmap='cmr.du
     img = ax.hist2d(true,pred, bins=bins, cmap=cmap, zorder=4, norm=norm)
     ax.set_xlim(xrange);
     ax.set_ylim(xrange);
-    ax.text(0.6, 0.2, "RMSE = %.2f"%(rmse(true-pred)),
+    ax.text(0.1, 0.9, "RMSE = %.2f"%(rmse(true-pred)),
             transform=ax.transAxes, zorder=3)
-    ax.text(0.6, 0.1, " MAE  = %.2f"%(mae(true-pred)),
+    ax.text(0.1, 0.8, " MAE  = %.2f"%(mae(true-pred)),
             transform=ax.transAxes, zorder=3)
 
     divider = make_axes_locatable(ax)
@@ -113,8 +113,8 @@ def draw_hist2d(ax, true, pred, xrange=[-2, 0.5], C=None, bins=100, cmap='cmr.du
     ax.figure.add_axes(ax2)
     ax2.hist2d(true, res, cmap=cmap, bins=bins, zorder=5, norm=colors.LogNorm())
     ax2.axhline(y=0, c='k', zorder=6, lw=5, ls="--")
-    ax2.axhline(y=np.percentile(res, 14), c='grey', zorder=6, lw=3, ls='--')
-    ax2.axhline(y=np.percentile(res, 86), c='grey', zorder=6, lw=3, ls='--')
+    ax2.axhline(y=np.percentile(res, 14), c='grey', zorder=6, lw=1, ls='--')
+    ax2.axhline(y=np.percentile(res, 86), c='grey', zorder=6, lw=1, ls='--')
     ax2.set_xlabel(r"APOGEE");
     ax2.set_ylim(xrange);
     ax2.set_xlim(xrange);
