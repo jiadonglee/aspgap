@@ -1,18 +1,35 @@
-# import numpy as np
-# %load_ext autoreload
-# %autoreload 2
+# -*- coding: utf-8 -*-
+"""
+Author
+------
+JDL
+Email
+-----
+jiadong.li at nyu.edu
+Created on
+----------
+- Fri Jan 31 12:00:00 2023
+Modifications
+-------------
+- Fri Feb 14 12:00:00 2023
+Aims
+----
+- KVXP training script
+"""
+
 import time
 import os
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler
 from sklearn.model_selection import KFold
-from transGaia.transgaia import xp2label
-from transGaia.data import GXP_5lb
+from kvxp.kvxp2 import specformer2, inference
+from kvxp.data import  GXP_AP_4lb
+
 
 def chi(pred, tgt, e_pred, e_tgt):
     var = torch.sqrt(torch.square(e_pred)+torch.square(e_tgt))
     return (pred-tgt)/var
-
 
 def kl_divergence(mean_pred, std_pred, mean2=0, std2=1):
     var_pred = torch.square(std_pred)
@@ -49,36 +66,53 @@ def cost_val(pred, tgt, e_pred, e_tgt):
     loss = cost(pred, tgt, var)
     return loss
 
+def cost_mse(pred, tgt):
+    cost = torch.nn.MSELoss(reduction='mean')
+    return cost(pred, tgt)
 
 
 if __name__ == "__main__":
-    #======================== Hyper parameters=============================
-    """traing params
+
+    #==============================
+    #========== Hyper parameters
     """
-    device = torch.device('cuda:1')
+    traing params
+    """
+
+    device = torch.device('cuda:0')
     TOTAL_NUM = 1000
-    BATCH_SIZE = 512
-    num_epochs = 150
+    BATCH_SIZE = int(2**9)
+    num_epochs = 200
     part_train = False
 
-    """data params
+    """
+    data params
     """
     data_dir = "/data/jdli/gaia/"
-    tr_file = "ap17_xp_66695_allstand0119.npy"
-    # tr_file = "ap17_wise_xp_66701_stand1220.npy"
+    tr_file = "ap_xp_13286.npy"
 
-    """model params
+    # coef_mask = None # no mask in training
+    coef_mask = torch.arange(108, 386, 1, dtype=int,  device=device)
+    # coef_mask = torch.arange(0,   110, 1, device=device) # XP mask in training
+    # coef_mask = torch.arange(110, 220, 1, device=device) # AP mask in training
     """
-    INPUT_LEN = 55*2+3
-    n_outputs = 8
-    n_dim = 128
-    n_head = 8
-    n_layer = 8
+    model params
+    """
+
+    # INPUT_LEN = 110
+    n_hi = 7514
+    n_start = 0
+    n_end   = 110
+    n_enc = 110
+    n_outputs = 4
+    n_dim = 32
+    n_head =  4
+    n_layer = 2
     # LR = 5e-5
-    LR_ = 1e-4
+    LR_ = 5e-4
     LMBDA_PEN = 1e-10
     LMBDA_ERR = 1e-1
-    model_dir = "/data/jdli/gaia/model/0122_4l_err_pen/"
+    model_dir = "/data/jdli/gaia/model/0214_apxp/"
 
     # Check if the directory exists
     if not os.path.exists(model_dir):
@@ -86,16 +120,17 @@ if __name__ == "__main__":
         print("make dir %s"%model_dir)
         os.makedirs(model_dir)
 
-    #=========================Data loading ================================
-    gdata  = GXP_5lb(
+    #=========================Data loading========================
+
+    gdata  = GXP_AP_4lb(
         data_dir+tr_file, total_num=TOTAL_NUM, 
-        part_train=part_train,  device=device,
+        part_train=part_train, device=device,
     )
     k_folds = 5
     kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
 
-    
-    ##==================Model ======================================
+    #========================= Model ==============================
+
     def train_epoch(tr_loader, epoch):
             # model.train()
         model.train()
@@ -103,16 +138,13 @@ if __name__ == "__main__":
         start_time = time.time()
         
         itr=0
+        
         for batch, data in enumerate(tr_loader):
-            output = model(data['x']).view(-1, 8)
-            
-            loss = cost_penalty(
-                output[:,:4], data['y'].view(-1,4), 
-                output[:,4:], data['e_y'].view(-1,4), 
-                model, lmbda_2=LMBDA_ERR
-                )
-            loss_value = loss.item()
+            x = data['x']
 
+            output = model(x).view(-1, 4)
+            loss = cost_mse(output, data['y'].view(-1,4))
+            loss_value = loss.item()
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
@@ -121,50 +153,50 @@ if __name__ == "__main__":
             total_loss+=loss_value
             itr+=1
             del data, output
+
         print("epoch %d train loss:%.4f | %.4f s"%(epoch, total_loss/itr, time.time()-start_time))
         
 
-    def eval(val_loader):
+    def eval(val_loader, epoch, mask_band='ap'):
         model.eval()
         total_val_loss=0
         itr=0
+
         with torch.no_grad():
             for batch, data in enumerate(val_loader):
 
-                output = model(data['x']).view(-1, 8)
-                loss = cost_val(
-                output[:,:4], data['y'].view(-1,4), 
-                output[:,4:], data['e_y'].view(-1,4),
-                )
+                x = data['x']
+                if mask_band == 'ap':
+                    x[:, 110:] = 0.
+                # output = inference(model, x, torch.arange(108, 386, 1, device=device), device)
+                output = model(x, inf=True).view(-1, 4)
+                loss = cost_mse(output, data['y'].view(-1, 4))
                 total_val_loss+=loss.item()
                 del data, output
                 itr+=1
 
         print("val loss:%.4f"%(total_val_loss/itr))
         return total_val_loss/itr
-#==================================================================
 
-    print("Training Start :================")     
+#===========================================================
 
-    for fold, (train_ids, valid_ids) in enumerate(kfold.split(gdata)):
+    print("Training Start :================")
+
+    for fold, (train_ids,valid_ids) in enumerate(kfold.split(gdata)):
+        
         print(f'FOLD {fold}')
         print('--------------------------------')
 
-        if fold>=0:
+        if fold==0:
 
-            model = xp2label(
-                n_encoder_inputs=INPUT_LEN, n_outputs=n_outputs, channels=n_dim, n_heads=n_head, n_layers=n_layer
-                ).to(device)
-
-            # check_point = model_dir + "sp2_4l_allstand_nll_%d_ep%d.pt"%(fold, 200)
-            # print("loading check point: " + check_point)
-            # model.load_state_dict(torch.load(check_point))
+            model = specformer2(n_enc, n_outputs).to(device)
+            # model = torch.compile(model)
 
             optimizer = torch.optim.Adam(
-                model.parameters(), lr=LR_, weight_decay=1e-8
+                model.parameters(), lr=LR_, weight_decay=1e-5
             )
-            # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
-            scheduler =  torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, verbose=True)
+
+            scheduler =  torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=10, verbose=True)
 
             train_subsampler = SubsetRandomSampler(train_ids)
             valid_subsampler = SubsetRandomSampler(valid_ids)
@@ -173,15 +205,16 @@ if __name__ == "__main__":
             val_loader = DataLoader(gdata, batch_size=BATCH_SIZE, sampler=valid_subsampler)
 
             for epoch in range(num_epochs+1):
+
                 train_epoch(tr_loader, epoch)
 
                 if epoch%5==0:
-                    val_loss = eval(val_loader)
+                    val_loss = eval(val_loader, epoch)
                     scheduler.step(val_loss)
-                    torch.save(model.state_dict(), model_dir+"val_temp.pt")
 
-                if epoch%25==0: 
-                    save_point = "sp2_4l_allstand_nll_%d_ep%d.pt"%(fold, epoch)
+                if epoch%50==0: 
+                    save_point = "sp2_4l_%d_ep%d.pt"%(fold, epoch)
                     torch.save(model.state_dict(), model_dir+save_point)
+
             # torch.cuda.empty_cache()
             del model
