@@ -1,3 +1,22 @@
+# -*- coding: utf-8 -*-
+"""
+Author
+------
+JDL
+Email
+-----
+jiadong.li at nyu.edu
+Created on
+----------
+- Fri Jan 31 12:00:00 2023
+Modifications
+-------------
+- Fri Feb 14 12:00:00 2023
+Aims
+----
+- specformer model script
+"""
+
 import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
@@ -43,8 +62,7 @@ class DataEmbedding(nn.Module):
 
 
 class specformer2(nn.Module):
-    def __init__(self, input_size, n_outputs, n_hi=7514, hidden_size=128, channels=32, 
-                 concat_size=386, num_heads=4, num_layers=4, dropout=0.1):
+    def __init__(self, input_size, n_outputs, n_hi=7514, hidden_size=128, channels=32, concat_size=388, num_heads=4, num_layers=4, dropout=0.1):
         super(specformer2, self).__init__()
         self.n_enc = input_size
         self.n_hi = n_hi
@@ -86,7 +104,7 @@ class specformer2(nn.Module):
              # (bs, dim, 278)
             src_a = F.leaky_relu(self.conv2(src_a))
             src = torch.concat((src_x, src_a), 2) # (bs, dim, 108+278)
-        # apply layer normalization
+        
         # x = self.layer_norm(src).permute(0,2,1) # (bs, 110+278, dim)
         # # apply multi-head self-attention
         # attn_output, _ = self.self_attn(x,x,x, key_padding_mask=mask)
@@ -117,21 +135,22 @@ def inference(model, input_data, mask_index, device):
         
         
 class CNN(nn.Module):
-    def __init__(self, n_input=7514, n_output=4):
+    def __init__(self, n_input=7514, n_output=4, in_channel=1):
         super().__init__()
         self.n_input = n_input
-        self.conv1 = nn.Conv1d(1, 32, kernel_size=3, stride=1, padding=1)
+        self.in_channel=in_channel
+        self.conv1 = nn.Conv1d(in_channel, 32, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
         self.fc1 = nn.Linear(64 * n_input, 128)
         self.fc2 = nn.Linear(128, n_output)
         
     def forward(self, x):
-        x = x.view(-1, 1, self.n_input)
-        x = torch.relu(self.conv1(x))
-        x = torch.relu(self.conv2(x))
-
+        # print(x.shape)
+        x = x.permute(0,2,1)
+        x = F.leaky_relu(self.conv1(x))
+        x = F.leaky_relu(self.conv2(x))
         x = x.view(x.size(0), -1)
-        x = torch.relu(self.fc1(x))
+        x = F.leaky_relu(self.fc1(x))
         x = self.fc2(x)
         return x
 
