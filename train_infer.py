@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler
 from sklearn.model_selection import KFold
-from kvxp.specformer import inferSpecFormer, SpecFormer2, SpecFormer
+from kvxp.specformer import MLP, SpecFormer2, SpecFormer
 from kvxp.kvxp2 import CNN
 from kvxp.data import  GXP_AP_4lb   
 
@@ -54,8 +54,8 @@ if __name__ == "__main__":
     """
 
     device = torch.device('cuda:0')
-    BATCH_SIZE = int(2**8)
-    num_epochs = 200
+    BATCH_SIZE = int(2**10)
+    num_epochs = 500
     part_train = False
 
     """
@@ -67,27 +67,24 @@ if __name__ == "__main__":
     """
     model params
     """
-    # INPUT_LEN = 110
-    n_hi = 234
-    n_cut = 7598
     n_enc = 110
-    n_outputs = 4
-    n_dim = 32
+    n_hi = 116
+    n_dim = 64
+    n_cut = n_hi*n_dim + n_enc
+    n_outputs = 1
     # LR = 5e-5
-    LR_ = 5e-4
-    model_dir = "/data/jdli/gaia/model/0216_apxp/"
+    LR_ = 5e-5
+    model_dir = "/data/jdli/gaia/model/0219_apxp/"
+    model_pre_name = model_dir+"sp2_alpha_%d_ep%d.pt"%(0,500)
+
+    # model_save_point = model_dir+"attn2_4l_%d_ep%d.pt"%(0,500)
+    model_save_point = None
 
     # Check if the directory exists
     if not os.path.exists(model_dir):
     # Create the directory
         print("make dir %s"%model_dir)
         os.makedirs(model_dir)
-
-    mask_band = 'no'
-    if mask_band == 'AP':
-        mask_coef = torch.arange(n_enc, n_enc+n_hi, 1, dtype=int, device=device)
-    else:
-        mask_coef = None
 
     #=========================Data loading========================
 
@@ -98,7 +95,8 @@ if __name__ == "__main__":
     k_folds = 5
     kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
 
-    #========================= Model ==============================
+    #========================= 
+    # Model ==============================
 
     def train_epoch(tr_loader, epoch):
             # model.train()
@@ -106,18 +104,18 @@ if __name__ == "__main__":
         total_loss = 0.0
         start_time = time.time()
         itr=0
+
+        for param in model_pre.parameters():
+            param.requires_grad = False
         
         for _, data in enumerate(tr_loader):
-            x1 = data['x'][:,:n_enc]
-            x2 = data['x'][:,n_enc:n_cut].reshape(-1, n_hi)
-            # tgt = torch.zeros_like(data['y'])
-            x2 = mask_ap(x2)
+            x1 = data['x'][:,:n_enc].view(-1, 1,n_enc)
+            x = model_pre(x1, infer=True)
+            x = x + x1.view(-1, n_enc, 1)
+            y = model_infer(x)
 
-            _, attn = model_pre(x1, x2,mask_coef=None)
-            # print(attn.shape)
-            y = model_infer(attn)
-
-            loss = cost_mse(y, data['y'].view(-1,4))
+            # loss = cost_mse(y, data['y'].view(-1,4))
+            loss = cost_mse(y, data['y'][:,-1].view(-1,1))
             loss_value = loss.item()
             optimizer.zero_grad()
             loss.backward()
@@ -126,7 +124,6 @@ if __name__ == "__main__":
 
             total_loss+=loss_value
             itr+=1
-            del data, y
 
         print("epoch %d train loss:%.4f | %.4f s"%(epoch, total_loss/itr, time.time()-start_time))
         
@@ -136,17 +133,18 @@ if __name__ == "__main__":
         total_val_loss=0
         itr=0
 
+        for param in model_pre.parameters():
+            param.requires_grad = False
+
         # with torch.no_grad():
         for batch, data in enumerate(val_loader):
-            x1 = data['x'][:,:n_enc]
-            x2 = data['x'][:,n_enc:n_cut].reshape(-1, n_hi)
-            x2 = mask_ap(x2)
-            
-            # tgt = torch.zeros_like(data['y'])
-            _, attn = model_pre(x1, x2,mask_coef=None)
-            y = model_infer(attn)
+            x1 = data['x'][:,:n_enc].view(-1, 1,n_enc)
+            x = model_pre(x1, infer=True)
+            x = x + x1.view(-1, n_enc, 1)
+            y = model_infer(x)
 
-            loss = cost_mse(y, data['y'].view(-1, 4))
+            # loss = cost_mse(y, data['y'].view(-1, 4))
+            loss = cost_mse(y, data['y'][:,-1].view(-1,1))
             total_val_loss+=loss.item()
             del data, y
             itr+=1
@@ -154,7 +152,7 @@ if __name__ == "__main__":
         print("val loss :%.4f"%(total_val_loss/itr))
         return total_val_loss/itr
 
-#===================================================
+#=================================================
 
     print("Training Start :================")
 
@@ -164,26 +162,34 @@ if __name__ == "__main__":
         print('--------------------------------')
 
         if fold==0:
-            
-            # model_infer = inferSpecFormer(n_enc+n_hi, n_outputs).to(device)
 
-            model_infer = CNN(n_input=344, n_output=4, in_channel=32).to(device)
-            model_pre = SpecFormer(n_enc, n_outputs, device=device).to(device)
+            model_infer = MLP(input_size=n_enc*n_dim, output_size=1, channel=32).to(device)
 
+            model_pre = SpecFormer(n_enc, n_outputs, device=device, n_hi=n_hi, channels=n_dim, 
+            ).to(device)
 
             """
             =========================
             Loading pre-trained model
             =========================
-            """         
+            """
+            if model_pre_name is not None:
+                model_pre.load_state_dict(
+                    remove_prefix(
+                        torch.load(model_pre_name)
+                    )
+                )
+                print(f"Loading pre-trained model: {model_pre_name}")
 
-            model_name = model_dir+"sp2_4l_%d_ep%d.pt"%(0,200)
-            pre_dict = torch.load(model_name)
-            pre_dict = remove_prefix(pre_dict)
-            print(f"Loading pre-trained model: {model_name}")
-            model_pre.load_state_dict(pre_dict)
+            if model_save_point is not None:
+                model_infer.load_state_dict(
+                    remove_prefix(
+                        torch.load(model_save_point)
+                        )
+                    )
+                print(f"Loading savepoint: {model_save_point}")
+            # model = torch.compile(model_infer)
 
-            # model = torch.compile(model)
             optimizer = torch.optim.Adam(
                 model_infer.parameters(), lr=LR_, weight_decay=1e-6
             )
@@ -198,7 +204,6 @@ if __name__ == "__main__":
 
 
             for epoch in range(num_epochs+1):
-
                 train_epoch(tr_loader, epoch)
 
                 if epoch%5==0:
@@ -206,8 +211,5 @@ if __name__ == "__main__":
                     scheduler.step(val_loss)
 
                 if epoch%50==0: 
-                    save_point = "attn2_4l_%d_ep%d.pt"%(fold, epoch)
+                    save_point = "attn2_alpha_%d_ep%d.pt"%(fold, epoch)
                     torch.save(model_infer.state_dict(), model_dir+save_point)
-
-            # torch.cuda.empty_cache()
-            del model_infer
