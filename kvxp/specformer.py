@@ -24,10 +24,11 @@ from torch import Tensor, nn
 
 
 class SpecFormer(nn.Module):
-    def __init__(self, input_size, n_outputs, n_hi=234, concat_size=388, hidden_size=128, channels=32, num_heads=4, num_layers=4, dropout=0.1, device=torch.device('cpu')):
+    def __init__(self, input_size, n_outputs, n_hi=116, hidden_size=128, channels=64, num_heads=4, num_layers=4, dropout=0.1, device=torch.device('cpu')):
 
         super(SpecFormer, self).__init__()
         self.input_size = input_size
+        self.n_outputs = n_outputs
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_layers = num_layers
@@ -35,11 +36,24 @@ class SpecFormer(nn.Module):
         self.num_hi = n_hi
         self.device = device
 
-        self.layer_norm = nn.LayerNorm(input_size+n_hi)
-        self.self_attn = nn.MultiheadAttention(channels, num_heads, batch_first=True, 
-        bias=False, dropout=dropout)
-        self.fc1 = nn.Linear((input_size+n_hi)*channels, hidden_size, bias=False)
-        self.fc2 = nn.Linear(hidden_size, n_outputs, bias=False)
+        self.layer_norm = nn.LayerNorm(channels)
+        self.input_proj1 = nn.Linear(1, 8, bias=False)
+        self.input_proj2 = nn.Linear(8, channels, bias=False)
+        # self.input_proj1 = nn.Conv1d(1, channels, kernel_size=3, padding=1)
+        # self.input_proj2 = nn.Conv1d(channels, channels, kernel_size=3, padding=1)
+
+        # self.self_attn = nn.MultiheadAttention(channels, num_heads, batch_first=True, 
+        # bias=False, dropout=dropout)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=channels, nhead=num_heads, dropout=dropout, dim_feedforward=4*channels, batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.fc1 = nn.Linear(channels, channels, bias=False)
+        self.fc2 = nn.Linear(channels, 4*channels, bias=False)
+        self.fc3 = nn.Linear(4*channels, hidden_size, bias=False)
+        self.fc4 = nn.Linear(hidden_size, 1, bias=False)
+        self.fc5 = nn.Linear(input_size+n_hi, n_outputs, bias=False)
+        self.fc6 = nn.Linear(input_size, n_outputs, bias=True)
 
     def add_position_encoding(self, x):
         # Get the dimension of the data
@@ -53,37 +67,37 @@ class SpecFormer(nn.Module):
         pos_encoding[:,:,1::2] = torch.cos(position * div_term)
         # Add the position encoding to the input tensor
         x = x + pos_encoding[:, :self.num_dim, :].to(self.device)
-        return x
+        return x.permute(0,2,1)
 
-    def forward(self, x1, x2, mask_coef=None):
-        # apply layer normalization
-        x1, x2 = x1.view(-1, 1, self.input_size), x2.view(-1, self.num_dim, self.num_hi)
-        x1 = x1.repeat(1, self.num_dim, 1)
+    def forward(self, x1, x2, infer=False):
+        x1 = x1.view(-1, self.input_size, 1)
+        x1 = self.input_proj1(x1) #(bs, n_seq, n_dim)
+        # x1 = self.input_proj1(x1) #(bs, n_dim, n_seq)
+        x1 = self.input_proj2(x1).view(-1, self.input_size, self.num_dim)
 
-        x = torch.concat((x1, x2), 2)
-        x = self.add_position_encoding(x)
-        # x1 = self.add_position_encoding(x1)
-        # x2 = self.add_position_encoding(x2) 
-        x = self.layer_norm(x)
-        x = x.permute(0,2,1)
-        # bs, n_seq, n_dim
-        # print(x.size())
-        # apply multi-head self-attention
-        if mask_coef is not None:
-            mask = torch.zeros([x.shape[1], x.shape[1]], dtype=torch.bool, device=self.device)
-            mask[mask_coef, mask_coef] = True
-            attn_output, _ = self.self_attn(x, x, x,attn_mask=mask)
+        if not infer:
+            x = torch.concat((x1, x2), 1) #(bs, n_seq, n_dim)
         else:
-            attn_output, _ = self.self_attn(x, x, x)
-
-        x_attn = x + attn_output
-        # apply feed-forward layers
-        x = torch.flatten(x_attn, start_dim=1)
-        x = F.leaky_relu(self.fc1(x))
-        x = self.fc2(x)
-        return x, x_attn
-
-
+            x = x1
+        x = x.permute(0,2,1) ##(bs, n_dim, n_seq)
+        x = self.add_position_encoding(x)
+        # bs, n_seq, n_dim
+        # x = self.layer_norm(x)
+        # attn_output, _ = self.self_attn(x, x, x)
+        src = self.encoder(x)
+        tgt = F.leaky_relu(self.fc1(src))
+        tgt = F.leaky_relu(self.fc2(tgt))
+        tgt = F.leaky_relu(self.fc3(tgt))
+        tgt = self.fc4(tgt)
+        tgt = torch.flatten(tgt, start_dim=1)
+        
+        if not infer:
+            tgt = self.fc5(tgt)
+        else:
+            tgt = self.fc6(tgt)
+        return tgt.view(-1, self.n_outputs)
+       
+    
 class inferSpecFormer(nn.Module):
     def __init__(self, input_size, n_outputs, channels=32, hidden_size=128, dropout=0.2, device=torch.device('cpu')):
         super(inferSpecFormer, self).__init__()
@@ -102,19 +116,12 @@ class inferSpecFormer(nn.Module):
         self.do = nn.Dropout(p=dropout)
 
     def forward(self, x):
-        # apply layer normalization
-        # bs, n_seq, n_dim
-        x = self.layer_norm(x.permute(0,2,1))
-        x = self.do(x)
-        x = x.reshape(x.shape[0], -1)
-        # apply feed-forward layers
-        # x = torch.flatten(x, start_dim=1)
-        x = F.leaky_relu(self.fc1(x))
-        # x = self.do(x)
-        x = F.leaky_relu(self.fc2(x))
-        x = self.fc3(x)
-        x = self.fc4(x)
-        return x
+        
+        tgt = F.leaky_relu(self.fc4(tgt))
+        tgt = self.fc5(tgt)
+        tgt = torch.flatten(tgt, start_dim=1)
+        tgt = self.fc6(tgt).view(-1, self.n_outputs)
+        return tgt
 
 
 class SpecFormer2(nn.Module):
@@ -189,10 +196,7 @@ class SpecFormer2(nn.Module):
         src_mask[:, mask_coef] = True
         return src_mask
 
-    def forward(self, x1, x2, tgt, mask_coef=None, infer=False):
-        x1, x2 = x1.view(-1, 1, self.input_size), x2.view(-1, self.num_dim, self.num_hi)
-        x1 = x1.repeat(1, self.num_dim, 1)
-        x = torch.concat((x1, x2), 2)
+    def forward(self, x, tgt, mask_coef=None, infer=False):
         x = self.add_position_encoding(x)
         # bs, n_seq, n_dim
 
@@ -203,7 +207,7 @@ class SpecFormer2(nn.Module):
             src_mask = None
             src_mask_tgt = None
 
-        x = self.layer_norm1(x)
+        # x = self.layer_norm1(x)
         attn_output, _ = self.self_attn(x, x, x,attn_mask=src_mask)
 
         src = x + attn_output
@@ -211,7 +215,6 @@ class SpecFormer2(nn.Module):
         src = self.ffn(src)
         """
         decoder
-
         """
         self.n_dec = tgt.shape[-1]
         tgt = self.add_position_encoding(tgt.view(-1,1,self.n_dec))
@@ -224,9 +227,37 @@ class SpecFormer2(nn.Module):
             tgt_mask=self.tgt_mask,
             memory_mask=src_mask_tgt,
             )
-        
         tgt = F.leaky_relu(self.fc4(tgt))
         tgt = self.fc5(tgt)
         tgt = torch.flatten(tgt, start_dim=1)
         tgt = self.fc6(tgt).view(-1, self.n_outputs)
         return tgt
+
+
+class MLP(nn.Module):
+    def __init__(self, input_size, output_size, hidden_size=1024, channel=64, dropout=0.1):
+        super(MLP, self).__init__()
+        self.input_size = input_size
+        self.output_size = output_size
+        self.layer_norm = nn.LayerNorm(input_size)
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, 4*hidden_size)
+        self.fc3 = nn.Linear(4*hidden_size, hidden_size)
+        self.fc4 = nn.Linear(hidden_size, 32)
+        self.fc5 = nn.Linear(32, output_size)
+        # self.fc6 = nn.Linear(input_size, output_size)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, x):
+        # x = x.view(-1, 1, self.input_size)
+        x = x.view(-1, self.input_size)
+        x = self.layer_norm(x)
+        x = F.leaky_relu(self.fc1(x))
+        x = self.dropout(x)
+        x = F.leaky_relu(self.fc2(x))
+        x = self.dropout(x)
+        x = F.leaky_relu(self.fc3(x))
+        x = self.dropout(x)
+        x = F.leaky_relu(self.fc4(x))
+        x = self.fc5(x)
+        return x.view(-1, self.output_size)

@@ -34,7 +34,7 @@ from kvxp.utils import *
 traing params
 """
 
-device = torch.device('cuda:1')
+device = torch.device('cuda:0')
 TOTAL_NUM = 1000
 BATCH_SIZE = int(2**8)
 num_epochs = 500
@@ -51,16 +51,16 @@ tr_file = "ap_xp_233985.npy"
 model params
 """
 n_enc = 11
-n_dim = 16
+n_dim = 32
 n_xp  = 110
 # n_cut = n_hi*n_dim + n_enc
 n_outputs = 4
-n_head =  4
-n_layer = 4
+n_head =  8
+n_layer = 8
 LR_ = 1e-3
 # LMBDA_PEN = 1e-10
 # LMBDA_ERR = 1e-1
-model_dir = "/data/jdli/gaia/model/0303_attn/"
+model_dir = "/data/jdli/gaia/model/0307_attn/"
 pre_trained = False
 # loss_function = WeightedMSE(10.0)
 loss_function = cost_mse
@@ -96,7 +96,8 @@ def train_epoch(tr_loader, epoch):
         y = data['y'][:,:n_outputs].view(-1,n_outputs)
         output = model(x=x, src_mask=data['x_mask'])
         # output = model(x=x)
-        loss = loss_function(output, y)
+        # loss = loss_function(output, y)
+        loss = cost_mse_pen(output.view(-1,4), y, model, lbda=1e-3)
 
         loss_value = loss.item()
         optimizer.zero_grad()

@@ -139,13 +139,16 @@ class CNN(nn.Module):
         super().__init__()
         self.n_input = n_input
         self.in_channel=in_channel
+        self.layer_norm = nn.LayerNorm(in_channel)
         self.conv1 = nn.Conv1d(in_channel, 32, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
         self.fc1 = nn.Linear(64 * n_input, 128)
         self.fc2 = nn.Linear(128, n_output)
         
+        
     def forward(self, x):
         # print(x.shape)
+        # x = self.layer_norm(x)
         x = x.permute(0,2,1)
         x = F.leaky_relu(self.conv1(x))
         x = F.leaky_relu(self.conv2(x))

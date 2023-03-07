@@ -24,36 +24,55 @@ import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler
 from sklearn.model_selection import KFold
 from kvxp.data import GXP_AP_4lb
-from kvxp.xpformer import XPformer2
+from kvxp.xpformer import XPformer2, MLP, MLP_upsampling
 from kvxp.utils import *
 
 
 ##==================Model ======================================
 
-def train_epoch(tr_loader, epoch, model, model_pre, opt1):
-    model.train()
+def train_epoch(tr_loader, epoch, 
+                encoder, decoder, hallucinator, model_pre, opt_enc, opt_dec, opt_hal,
+                alpha1=0.5, alpha2=0.5):
+    encoder.train()
+    decoder.train()
+    hallucinator.train()
+
     total_loss = 0.0
     start_time = time.time()
     itr=0
     for batch, data in enumerate(tr_loader):
-
-        # ap = data['x'][:, :n_xp]
-        ap = model(data['x'][:, :n_xp]).reshape(-1,938,8)
+        y = data['y'].view(-1,4)
+        z = encoder(data['x'][:, :n_xp]) # (bs, 1024, 1)
+        ap = hallucinator(z).reshape(-1,938,8)
         y1 = model_pre(ap)
-        loss1 = cost_mse(y1.view(-1,4), data['y'].view(-1,4))
+        y2 = decoder(z)
 
-        loss_value = loss1.item()
-        opt1.zero_grad()
-        loss1.backward()
-        opt1.step()
-        total_loss+=loss_value
+        # loss1 = cost_mse(y1.view(-1,4), data['y'].view(-1,4)) 
+        loss = alpha1*cost_mse(y1.view(-1,4), y) + alpha2*cost_mse(y2.view(-1,4), y)
+
+        # opt.zero_grad()
+        # opt.step()
+        opt_enc.zero_grad()
+        opt_enc.step()
+
+        opt_dec.zero_grad()
+        opt_dec.step()
+
+        opt_hal.zero_grad()
+        opt_hal.step()
+
+        loss.backward()
+        
+        total_loss+= loss.item()
         itr+=1
 
     print("epoch %d train loss:%.4f | %.4f s"%(epoch, total_loss/itr, time.time()-start_time))
     
 
-def eval(val_loader, epoch, model, model_pre):
-    model.eval()
+def eval(val_loader, epoch, encoder, decoder, hallucinator, model_pre, alpha1=0.5, alpha2=0.5):
+    encoder.eval()
+    decoder.eval()
+    hallucinator.eval()
     model_pre.eval()
 
     total_val_loss=0
@@ -61,13 +80,17 @@ def eval(val_loader, epoch, model, model_pre):
     # with torch.no_grad():
     for batch, data in enumerate(val_loader):
 
-        # ap = data['x'][:, :n_xp]
-        ap = model(data['x'][:, :n_xp]).reshape(-1,938,8)
+        y = data['y'].view(-1,4)
+        z = encoder(data['x'][:, :n_xp]) # (bs, 1024, 1)
+        ap = hallucinator(z).reshape(-1,938,8)
         y1 = model_pre(ap)
-        loss1 = cost_mse(y1.view(-1,4), data['y'].view(-1,4))
-        loss_value = loss1.item()
+        y2 = decoder(z)
+        
+        loss = alpha1*cost_mse(y1.view(-1,4), y) + alpha2*cost_mse(y2.view(-1,4), y)
+        loss_value = loss.item()
         total_val_loss+=loss_value
         itr+=1
+
     print("val loss:%.4f"%(total_val_loss/itr))
     return total_val_loss/itr
 
@@ -80,10 +103,8 @@ if __name__ == "__main__":
     """
     traing params
     """
-    band = "xp"
-    mask_band = "ap"
     device = torch.device('cuda:0')
-    BATCH_SIZE = int(2**8)
+    BATCH_SIZE = int(2**10)
     num_epochs = 500
     part_train = False
 
@@ -95,20 +116,18 @@ if __name__ == "__main__":
     """
     model params
     """
-
-    # INPUT_LEN = 110
     n_xp = 110
     n_ap = 7504
+    n_latent = 1024
     n_labels = 4
     # LR = 5e-5
-    LR_ = 1e-4
+    LR_ = 1e-6
     loss_penal = 2
     LMBDA_PEN = 1e-10
     LMBDA_ERR = 1e-1
     
     # model_dir = f"/data/jdli/gaia/model/0220/"
-    model_dir = f"/data/jdli/gaia/model/0306/"
-    # save_preflix = f"xp2_4l_%d_ep%d.pt"
+    model_dir = f"/data/jdli/gaia/model/0307/"
 
     # Check if the directory exists
     if not os.path.exists(model_dir):
@@ -128,7 +147,6 @@ if __name__ == "__main__":
     kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
     #======================================================================
 
-
     print("Training Start :================")     
 
     for fold, (train_ids, valid_ids) in enumerate(kfold.split(gdata)):
@@ -138,10 +156,8 @@ if __name__ == "__main__":
 
         if fold==0:
 
-            # model_pre = MLP(n_ap, n_labels, hidden_size=1024).to(device)
             model_pre = XPformer2(938, n_labels, device=device, input_proj=False).to(device)
-            model_pre_name = "/data/jdli/gaia/model/0306/" +"ap2_4l_%d_ep%d.pt"%(0,1000)
-
+            model_pre_name = "/data/jdli/gaia/model/0306/" +"ap2_4l_%d_ep%d.pt"%(0,200)
             model_pre.load_state_dict(
                 remove_prefix(
                     torch.load(model_pre_name)
@@ -153,14 +169,21 @@ if __name__ == "__main__":
             for param in model_pre.parameters():
                 param.requires_grad = False
 
-            model = XPformer2(
-                n_xp, n_ap, device=device, input_proj=True, 
-                hidden_size=1024
-                ).to(device)
+            encoder = MLP_upsampling(n_xp, n_latent).to(device)
+            hallucinator = MLP_upsampling(n_latent, n_ap).to(device)
+            decoder = MLP(n_latent, n_labels).to(device)
 
-            optimizer = torch.optim.Adam(
-                model.parameters(), lr=LR_, weight_decay=1e-6
-            )
+            # encoder = XPformer2(n_xp, n_latent, hidden_size=128, device=device).to(device)
+            # hallucinator = XPformer2(n_latent, n_ap, hidden_size=1024, device=device).to(device)
+            # decoder = XPformer2(n_latent, n_labels, hidden_size=64, device=device).to(device)
+            # params = list(encoder.parameters()) + list(hallucinator.parameters()) + list(decoder.parameters())
+            # optimizer = torch.optim.Adam(
+            #     params, lr=LR_, weight_decay=1e-5
+            # )
+            opt_enc = torch.optim.Adam(encoder.parameters(), lr=LR_, weight_decay=1e-8)
+            opt_hal = torch.optim.Adam(hallucinator.parameters(), lr=LR_, weight_decay=1e-8)
+            opt_dec = torch.optim.Adam(decoder.parameters(), lr=LR_, weight_decay=1e-8)
+
             train_subsampler = SubsetRandomSampler(train_ids)
             valid_subsampler = SubsetRandomSampler(valid_ids)
             
@@ -168,11 +191,11 @@ if __name__ == "__main__":
             val_loader = DataLoader(gdata, batch_size=BATCH_SIZE, sampler=valid_subsampler)
 
             for epoch in range(num_epochs+1):
-                train_epoch(tr_loader, epoch, model, model_pre, optimizer)
+                train_epoch(tr_loader, epoch, encoder, decoder, hallucinator, model_pre, opt_enc, opt_dec, opt_hal)
 
                 if epoch%5==0:
-                    val_loss = eval(val_loader, epoch, model, model_pre)
+                    val_loss = eval(val_loader, epoch, encoder, decoder, hallucinator, model_pre,)
 
                 if epoch%50==0: 
                     # save_point = save_preflix%(fold, epoch)
-                    torch.save(model.state_dict(), model_dir+f"xp2ap_%d_ep%d.pt"%(fold, epoch))
+                    torch.save(decoder.state_dict(), model_dir+f"xp2l%d_ep%d.pt"%(fold, epoch))
