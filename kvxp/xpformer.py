@@ -138,6 +138,90 @@ class XPformer2(nn.Module):
     
 
 
+class XPAPformer(nn.Module):
+    def __init__(self, input1_size, input2_size, n_outputs, input_proj=True, output_proj=False, 
+                 hidden_size=16, channels=8, num_heads=2, num_layers=2,
+                 dropout=0.1, device=torch.device('cpu')):
+
+        super(XPAPformer, self).__init__()
+        self.input1_size = input1_size
+        self.input2_size = input2_size
+        self.num_dim = channels
+        self.n_outputs = n_outputs
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.device = device
+        self.input_proj = input_proj
+        self.output_proj = output_proj
+
+        self.drop = nn.Dropout(p=dropout)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=channels, nhead=num_heads,
+            dropout=dropout, dim_feedforward=4*channels, 
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        self.input_project = nn.Linear(1, self.num_dim)
+        self.fc1 = nn.Linear(channels*(input1_size+input2_size), hidden_size, bias=False)
+        self.fc2 = nn.Linear(hidden_size, n_outputs, bias=False)
+
+    def add_position_encoding(self, x):
+        # Get the dimension of the data
+        k = self.input1_size + self.input2_size
+        # Generate the position encoding matrix
+        pos_encoding = torch.zeros((1, self.num_dim, k))
+        position = torch.arange(0, self.num_dim, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, k, 2, dtype=torch.float) * (-math.log(10000.0) / k))
+        pos_encoding[:,:,0::2] = torch.sin(position * div_term)
+        pos_encoding[:,:,1::2] = torch.cos(position * div_term)
+        # Add the position encoding to the input tensor
+        x = x + pos_encoding[:, :self.num_dim, :].to(self.device)
+        return x.permute(0,2,1)
+
+    def forward(self, xp=None, ap=None, xp_mask=None):
+        # x = x.reshape(-1, self.num_dim, self.input_size)
+        xp = xp.reshape(-1, self.input1_size, 1)
+        xp = self.input_project(xp)
+
+        if ap is not None:
+            ap = ap.reshape(-1, self.input2_size, self.num_dim)
+            
+            if xp_mask is not None:
+                x_mask = torch.concat((xp_mask, 
+                                       torch.zeros_like(ap[:,:,0], device=self.device).bool()), 
+                                       dim=1)
+            else:
+                x_mask = None
+
+        else:
+            ap = torch.zeros(xp.shape[0], self.input2_size, self.num_dim, device=self.device)
+
+            if xp_mask is not None:
+                # mask ap positions
+                x_mask = torch.concat((xp_mask, 
+                                       torch.ones_like(ap[:,:,0], device=self.device).bool()), 
+                                       dim=1)
+            else:
+                x_mask = torch.concat((xp_mask, 
+                                       torch.ones_like(ap[:,:,0], device=self.device).bool()), 
+                                       dim=1)
+
+        x = torch.concat((xp, ap), dim=1)
+        # x = x.reshape(-1, self.input_size, self.num_dim)
+
+        x = self.add_position_encoding(x.permute(0,2,1))
+        x = self.drop(x)
+        tgt = self.encoder(x, src_key_padding_mask=x_mask) #(bs, 11, 10)
+        tgt = self.drop(tgt)
+        tgt = torch.flatten(tgt, start_dim=1)
+        tgt = F.leaky_relu(self.fc1(tgt))
+        tgt = self.fc2(tgt)
+        return tgt.view(-1, self.n_outputs)
+
+
 class XPformerConv(nn.Module):
     def __init__(self, input_size, n_outputs, input_proj=True, output_proj=False, 
                  hidden_size=16, channels=8, num_heads=2, num_layers=2,
@@ -206,6 +290,10 @@ class XPformerConv(nn.Module):
         tgt = F.leaky_relu(self.fc1(tgt))
         tgt = self.fc2(tgt)
         return tgt
+    
+
+
+
        
 class CNN(nn.Module):
     def __init__(self, n_input=7514, n_output=4, in_channel=1):

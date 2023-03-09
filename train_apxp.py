@@ -20,6 +20,7 @@ Aims
 
 import time
 import os
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler
 from sklearn.model_selection import KFold
@@ -65,6 +66,7 @@ def train_epoch(tr_loader, epoch, hallucinator, model_pre, decoder, encoder, opt
         itr+=1
 
     print("epoch %d train loss:%.4f | %.4f s"%(epoch, total_loss/itr, time.time()-start_time))
+    return total_loss/itr
     
 
 def eval(val_loader, epoch, hallucinator, model_pre, decoder, encoder, 
@@ -111,14 +113,14 @@ if __name__ == "__main__":
     mask_band = "ap"
     device = torch.device('cuda:0')
     BATCH_SIZE = int(2**8)
-    num_epochs = 1000
+    num_epochs = 500
     part_train = False
 
     """
     data params
     """
     data_dir = "/data/jdli/gaia/"
-    tr_file = "ap_xp_13286.npy"
+    tr_file = "apspec_xp_173344.npy"
     """
     model params
     """
@@ -133,9 +135,11 @@ if __name__ == "__main__":
     loss_penal = 2
     LMBDA_PEN = 1e-10
     LMBDA_ERR = 1e-1
-    
+    WEIGHT_DECAY = 1e-5
+    alpha1 = 0.8
+    alpha2 = 0.2
     # model_dir = f"/data/jdli/gaia/model/0220/"
-    model_dir = f"/data/jdli/gaia/model/0307/"
+    model_dir = f"/data/jdli/gaia/model/0309/"
     # save_preflix = f"xp2_4l_%d_ep%d.pt"
 
     # Check if the directory exists
@@ -155,7 +159,8 @@ if __name__ == "__main__":
     k_folds = 5
     kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
     #======================================================================
-
+    tr_loss_lst = []
+    val_loss_lst = []
 
     print("Training Start :================")     
 
@@ -168,7 +173,7 @@ if __name__ == "__main__":
 
             # model_pre = MLP(n_ap, n_labels, hidden_size=1024).to(device)
             model_pre = XPformer2(938, n_labels, device=device, input_proj=False).to(device)
-            model_pre_name = "/data/jdli/gaia/model/0306/" +"ap2_4l_%d_ep%d.pt"%(0,500)
+            model_pre_name = "/data/jdli/gaia/model/0306/" +"ap2_4l_%d_ep%d.pt"%(0,1000)
 
             model_pre.load_state_dict(
                 remove_prefix(
@@ -181,13 +186,15 @@ if __name__ == "__main__":
             for param in model_pre.parameters():
                 param.requires_grad = False
 
-            hallucinator = MLP_upsampling(n_lat, n_ap).to(device)
+            hallucinator = MLP_upsampling(n_lat, n_ap, dropout=0.5).to(device)
             decoder = MLP(n_lat, n_labels).to(device)
-            encoder = MLP_upsampling(n_xp, n_lat).to(device)
+            encoder = MLP_upsampling(n_xp, n_lat, dropout=0.5).to(device)
 
-            opt_hal = torch.optim.Adam(hallucinator.parameters(), lr=LR_, weight_decay=1e-6)
-            opt_dec = torch.optim.Adam(decoder.parameters(), lr=LR_, weight_decay=1e-6)
-            opt_enc = torch.optim.Adam(encoder.parameters(), lr=LR_, weight_decay=1e-6)
+            print()
+
+            opt_hal = torch.optim.Adam(hallucinator.parameters(), lr=LR_, weight_decay=WEIGHT_DECAY)
+            opt_dec = torch.optim.Adam(decoder.parameters(), lr=LR_, weight_decay=WEIGHT_DECAY)
+            opt_enc = torch.optim.Adam(encoder.parameters(), lr=LR_, weight_decay=WEIGHT_DECAY)
 
             train_subsampler = SubsetRandomSampler(train_ids)
             valid_subsampler = SubsetRandomSampler(valid_ids)
@@ -196,14 +203,18 @@ if __name__ == "__main__":
             val_loader = DataLoader(gdata, batch_size=BATCH_SIZE, sampler=valid_subsampler)
 
             for epoch in range(num_epochs+1):
-                train_epoch(tr_loader, epoch, 
+                tr_loss = train_epoch(tr_loader, epoch, 
                             hallucinator=hallucinator, model_pre=model_pre, decoder=decoder, encoder=encoder,
-                            opt_hal=opt_hal, opt_dec=opt_dec, opt_enc=opt_enc)
+                            opt_hal=opt_hal, opt_dec=opt_dec, opt_enc=opt_enc, 
+                            alpha1=alpha1, alpha2=alpha2)
+                tr_loss_lst.append(tr_loss)
 
                 if epoch%5==0:
                     val_loss = eval(val_loader, epoch,  
                                     hallucinator=hallucinator, model_pre=model_pre, decoder=decoder, encoder=encoder)
+                    val_loss_lst.append(val_loss)
 
                 if epoch%50==0: 
                     # save_point = save_preflix%(fold, epoch)
                     torch.save(decoder.state_dict(), model_dir+f"lat2_4l_%d_ep%d.pt"%(fold, epoch))
+                    np.save("check/loss.npy", {'tr_loss':tr_loss_lst, 'val_loss':val_loss_lst})

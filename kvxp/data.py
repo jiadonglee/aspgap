@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from astropy.table import Table
+import pickle
 
 class APerr():
     """ 
@@ -739,3 +740,68 @@ class GXP_4lb():
         y = torch.tensor(self.labels[idx].astype(np.float32)).to(self.device)
         e_y = torch.tensor(self.e_labels[idx].astype(np.float32)).to(self.device)
         return {'x':x, 'y':y, 'x_mask':x_mask, 'e_y':e_y, 'id':self.source_id[idx]}
+
+
+
+class GXP_4lb_infer():
+    """
+    Gaia DR3 XP continuous spectrum to stellar labels instance
+    """
+    def __init__(self, data, total_num=6000, part_train=False, device=torch.device('cpu')) -> None:
+        
+        self.data = np.load(data, allow_pickle=True).item()
+        self.xp = self.data['x']
+        self.xp_mask    = self.data['x_mask']
+        self.source_id  = self.data['source_id']
+        self.total_num  = total_num
+        self.part_train = part_train
+        self.device = device
+    
+    def __len__(self) -> int:
+        if self.part_train:
+            num_sets = self.total_num
+        else:
+            num_sets = len(self.xp)
+        return num_sets
+
+    def __getitem__(self, idx: int):
+        x = torch.tensor(self.xp[idx].astype(np.float32)).to(self.device)
+        x_mask = torch.tensor(self.xp_mask[idx], dtype=torch.bool).to(self.device)
+        return {'x':x, 'x_mask':x_mask, 'id':self.source_id[idx]}
+
+
+class XPAP4l():
+    """
+    Gaia DR3 XP continuous spectrum, combined
+    with AP spectra to stellar labels instance
+    """
+    def __init__(self, data_path, total_num=6000, part_train=False, device=torch.device('cpu')) -> None:
+        
+        with open(data_path, 'rb') as pfile:
+            self.data = pickle.load(pfile)
+        
+        self.xp = self.data['xp']
+        self.ap = self.data['ap']
+        self.labels = self.data['y']
+        self.e_labels   = self.data['e_y']
+        self.xp_mask    = self.data['xp_mask']
+        self.source_id  = self.data['source_id']
+        self.total_num  = total_num
+        self.part_train = part_train
+        self.device = device
+    
+    def __len__(self) -> int:
+        if self.part_train:
+            num_sets = self.total_num
+        else:
+            num_sets = len(self.labels)
+        return num_sets
+
+    def __getitem__(self, idx: int):
+        xp = torch.tensor(self.xp[idx].astype(np.float32)).to(self.device)
+        ap = torch.tensor(self.ap[idx].astype(np.float32)).to(self.device)
+
+        xp_mask = torch.tensor(self.xp_mask[idx], dtype=torch.bool).to(self.device)
+        y = torch.tensor(self.labels[idx].astype(np.float32)).to(self.device)
+        e_y = torch.tensor(self.e_labels[idx].astype(np.float32)).to(self.device)
+        return {'xp':xp, 'ap':ap, 'y':y, 'xp_mask':xp_mask, 'e_y':e_y, 'id':self.source_id[idx]}
