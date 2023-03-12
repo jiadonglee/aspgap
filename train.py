@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler
 from sklearn.model_selection import KFold
-from kvxp.xpformer import XPAPformer, CNN
+from kvxp.xpformer import XPAPformer, XPAPformerConv, XPAPformerConv2
 from kvxp.data import XPAP4l
 from kvxp.utils import *
 
@@ -61,11 +61,11 @@ n_ap  = 128
 n_outputs = 4
 n_head =  8
 n_layer = 8
-LR_ = 1e-5
+LR_ = 1e-4
 # LMBDA_PEN = 1e-10
 # LMBDA_ERR = 1e-1
-model_dir = "/data/jdli/gaia/model/0309_attn/"
-pre_trained = True
+model_dir = "/data/jdli/gaia/model/0310_attnconv2/"
+pre_trained = False
 # loss_function = WeightedMSE(10.0)
 loss_function = cost_mse
 
@@ -129,6 +129,7 @@ def eval(val_loader, epoch):
             y = data['y'][:,:n_outputs].view(-1,n_outputs)
             # output = model(x=x, src_mask=data['x_mask'])
             output = model(xp=data['xp'], ap=None, xp_mask=data['xp_mask'])
+            # output = model(xp=data['xp'], ap=data['ap'], xp_mask=data['xp_mask'])
             # output = model(x=x)
             loss = cost_mse(output, y)
 
@@ -150,7 +151,7 @@ for fold, (train_ids,valid_ids) in enumerate(kfold.split(gdata)):
 
     if fold==0:
 
-        model = XPAPformer(
+        model = XPAPformerConv2(
             n_xp, n_ap, n_outputs, 
             device=device, channels=n_dim, 
         ).to(device)
@@ -171,6 +172,7 @@ for fold, (train_ids,valid_ids) in enumerate(kfold.split(gdata)):
         #         param.requires_grad = False
 
         # model = torch.compile(model)
+
         optimizer = torch.optim.Adam(
             model.parameters(), lr=LR_, weight_decay=1e-5
         )
@@ -190,8 +192,9 @@ for fold, (train_ids,valid_ids) in enumerate(kfold.split(gdata)):
             if epoch%5==0:
                 val_loss = eval(val_loader, epoch)
 
-            if epoch%10==0: 
+            if epoch%50==0: 
                 save_point = "xp2_4l_%d_ep%d.pt"%(fold, epoch)
+                # save_point = "sp2_4l_%d_ep%d.pt"%(fold,epoch)
                 torch.save(model.state_dict(), model_dir+save_point)
 
         del model

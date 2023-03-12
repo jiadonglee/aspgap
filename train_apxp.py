@@ -24,8 +24,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler
 from sklearn.model_selection import KFold
-from kvxp.data import GXP_AP_4lb
-from kvxp.xpformer import XPformer2, MLP, MLP_upsampling
+from kvxp.data import XPAP4l
+from kvxp.xpformer import XPAPformerConv, MLP, MLP_upsampling
 from kvxp.utils import *
 
 
@@ -40,11 +40,11 @@ def train_epoch(tr_loader, epoch, hallucinator, model_pre, decoder, encoder, opt
     itr=0
     for batch, data in enumerate(tr_loader):
         y = data['y'].view(-1,4)
-        xp = data['x'][:, :n_xp]
+        xp = data['xp']
         # ap = data['x'][:, :n_xp]
         z  = encoder(xp)
-        ap = hallucinator(z).reshape(-1,938,8)
-        y1 = model_pre(ap)
+        ap = hallucinator(z).reshape(-1,n_dim, n_ap)
+        y1 = model_pre(xp=xp, ap=ap)
         y2 = decoder(z)
         loss = alpha1*cost_mse(y1.view(-1,4), y) + alpha2*cost_mse(y2.view(-1,4), y)
 
@@ -82,11 +82,11 @@ def eval(val_loader, epoch, hallucinator, model_pre, decoder, encoder,
     itr=0
     for batch, data in enumerate(val_loader):
         y = data['y'].view(-1,4)
-        xp = data['x'][:, :n_xp]
+        xp = data['xp']
         # ap = data['x'][:, :n_xp]
         z  = encoder(xp)
-        ap = hallucinator(z).reshape(-1,938,8)
-        y1 = model_pre(ap)
+        ap = hallucinator(z).reshape(-1,n_dim, n_ap)
+        y1 = model_pre(xp=xp, ap=ap)
         y2 = decoder(z)
         loss_1 = cost_mse(y1.view(-1,4), y)
         loss_2 = cost_mse(y2.view(-1,4), y)
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     band = "xp"
     mask_band = "ap"
     device = torch.device('cuda:0')
-    BATCH_SIZE = int(2**8)
+    BATCH_SIZE = int(2**12)
     num_epochs = 500
     part_train = False
 
@@ -120,14 +120,15 @@ if __name__ == "__main__":
     data params
     """
     data_dir = "/data/jdli/gaia/"
-    tr_file = "apspec_xp_173344.npy"
+    tr_file = "apspec_xp_173344.dump"
     """
     model params
     """
 
     # INPUT_LEN = 110
     n_xp = 110
-    n_ap = 7504
+    n_ap = 128
+    n_dim = 64
     n_lat = 1024
     n_labels = 4
     # LR = 5e-5
@@ -138,9 +139,7 @@ if __name__ == "__main__":
     WEIGHT_DECAY = 1e-5
     alpha1 = 0.8
     alpha2 = 0.2
-    # model_dir = f"/data/jdli/gaia/model/0220/"
-    model_dir = f"/data/jdli/gaia/model/0309/"
-    # save_preflix = f"xp2_4l_%d_ep%d.pt"
+    model_dir = f"/data/jdli/gaia/model/0311/"
 
     # Check if the directory exists
     if not os.path.exists(model_dir):
@@ -151,11 +150,7 @@ if __name__ == "__main__":
         print(f"save trained-model to {model_dir}")
 
     #=========================Data loading ================================
-    gdata  = GXP_AP_4lb(
-        data_dir+tr_file,
-        part_train=part_train, 
-        device=device,
-    )
+    gdata  = XPAP4l(data_dir+tr_file, device=device, part_train=False)
     k_folds = 5
     kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
     #======================================================================
@@ -172,8 +167,9 @@ if __name__ == "__main__":
         if fold==0:
 
             # model_pre = MLP(n_ap, n_labels, hidden_size=1024).to(device)
-            model_pre = XPformer2(938, n_labels, device=device, input_proj=False).to(device)
-            model_pre_name = "/data/jdli/gaia/model/0306/" +"ap2_4l_%d_ep%d.pt"%(0,1000)
+            model_pre = XPAPformerConv(n_xp, n_ap, n_labels,
+                                       channels=n_dim, device=device, input_proj=False).to(device)
+            model_pre_name = "/data/jdli/gaia/model/0310_attnconv/" + "sp2_4l_%d_ep%d.pt"%(0,50)
 
             model_pre.load_state_dict(
                 remove_prefix(
@@ -186,11 +182,10 @@ if __name__ == "__main__":
             for param in model_pre.parameters():
                 param.requires_grad = False
 
-            hallucinator = MLP_upsampling(n_lat, n_ap, dropout=0.5).to(device)
+            hallucinator = MLP_upsampling(n_lat, n_ap*n_dim, dropout=0.5).to(device)
             decoder = MLP(n_lat, n_labels).to(device)
-            encoder = MLP_upsampling(n_xp, n_lat, dropout=0.5).to(device)
+            encoder = MLP_upsampling(n_xp, n_lat, dropout=0.2).to(device)
 
-            print()
 
             opt_hal = torch.optim.Adam(hallucinator.parameters(), lr=LR_, weight_decay=WEIGHT_DECAY)
             opt_dec = torch.optim.Adam(decoder.parameters(), lr=LR_, weight_decay=WEIGHT_DECAY)
@@ -216,5 +211,7 @@ if __name__ == "__main__":
 
                 if epoch%50==0: 
                     # save_point = save_preflix%(fold, epoch)
+                    torch.save(hallucinator.state_dict(), model_dir+f"lat2_ap_%d_ep%d.pt"%(fold, epoch))
+                    torch.save(encoder.state_dict(), model_dir+f"xp2_lat_%d_ep%d.pt"%(fold, epoch))
                     torch.save(decoder.state_dict(), model_dir+f"lat2_4l_%d_ep%d.pt"%(fold, epoch))
                     np.save("check/loss.npy", {'tr_loss':tr_loss_lst, 'val_loss':val_loss_lst})
