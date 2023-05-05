@@ -23,8 +23,9 @@ import os
 import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler
 from sklearn.model_selection import KFold
-from kvxp.xpformer import XPformer2
-from kvxp.data import GXP_AP_4lb
+# from kvxp.xpformer import XPformer2
+from kvxp.apxp import CNN
+from kvxp.data import XPAP4l
 from kvxp.utils import *
 
 ##==================Model ======================================
@@ -37,20 +38,17 @@ def train_epoch(tr_loader, epoch, model, opt1, data_type='ap'):
     for batch, data in enumerate(tr_loader):
 
         if data_type == 'ap':
-            x = data['x'][:, n_xp:n_xp+938*8]
-            x = x.reshape(-1,938,8)
+            x = data['ap'].reshape(-1, 1, n_ap*n_dim)
 
         elif data_type == 'xp':
-            x = data['x'][:, :n_xp]
+            x = data['xp']
 
         y = model(x)
         loss1 = cost_mse(y.view(-1,4), data['y'].view(-1,4))
-
-        loss_value = loss1.item()
         opt1.zero_grad()
         loss1.backward()
         opt1.step()
-        total_loss+=loss_value
+        total_loss+=loss1.item()
         itr+=1
 
     print("epoch %d train loss:%.4f | %.4f s"%(epoch, total_loss/itr, time.time()-start_time))
@@ -64,11 +62,10 @@ def eval(val_loader, epoch, model, data_type='ap'):
     for batch, data in enumerate(val_loader):
 
         if data_type == 'ap':
-            x = data['x'][:, n_xp:n_xp+938*8]
-            x = x.reshape(-1,938,8)
+            x = data['ap'].reshape(-1, 1, n_ap*n_dim)
 
         elif data_type == 'xp':
-            x = data['x'][:, :n_xp]
+            x = data['xp']
 
         y = model(x)
         loss1 = cost_mse(y.view(-1,4), data['y'].view(-1,4))
@@ -87,35 +84,38 @@ if __name__ == "__main__":
     """
     traing params
     """
-    band = "xp"
-    mask_band = "ap"
+
     device = torch.device('cuda:0')
-    BATCH_SIZE = int(2**8)
-    num_epochs = 1000
+    TOTAL_NUM = 200
+    BATCH_SIZE = int(2**10)
+    num_epochs = 500
     part_train = False
 
     """
     data params
     """
     data_dir = "/data/jdli/gaia/"
-    tr_file = "ap_xp_13286.npy"
+    tr_file = "apspec_xp_173344.dump"
     """
     model params
     """
 
-    # INPUT_LEN = 110
-    n_xp = 110
-    # n_ap = 7514
-    n_ap = 7512
+    n_enc = 11
+    n_dim = 64
+    n_xp  = 110
+    n_ap  = 128
     n_labels = 4
-    # LR = 5e-5
-    LR_ = 5e-4
-    loss_penal = 2
-    LMBDA_PEN = 1e-10
-    LMBDA_ERR = 1e-1
-    
-    # model_dir = f"/data/jdli/gaia/model/0220/"
-    model_dir = f"/data/jdli/gaia/model/0306/"
+    # n_cut = n_hi*n_dim + n_enc
+    n_outputs = 4
+    n_head =  8
+    n_layer = 8
+    LR_ = 1e-4
+    # LMBDA_ERR = 1e-1
+    model_dir = "/data/jdli/gaia/model/0311_mlp/"
+    pre_trained = False
+    # loss_function = WeightedMSE(10.0)
+    loss_function = cost_mse
+
     save_preflix = f"ap2_4l_%d_ep%d.pt"
 
     # Check if the directory exists
@@ -127,11 +127,8 @@ if __name__ == "__main__":
         print(f"save trained-model to {model_dir}")
 
     #=========================Data loading ================================
-    gdata  = GXP_AP_4lb(
-        data_dir+tr_file,
-        part_train=part_train, 
-        device=device,
-    )
+
+    gdata  = XPAP4l(data_dir+tr_file, device=device, part_train=False)
     k_folds = 5
     kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
     #======================================================================
@@ -146,12 +143,10 @@ if __name__ == "__main__":
 
         if fold==0:
 
-            # model = MLP(n_xp, n_labels, hidden_size=128).to(device)
-            # model = MLP(n_ap, n_labels, hidden_size=256).to(device)
-            model = XPformer2(938, n_labels, device=device, input_proj=False).to(device)
+            model = CNN(n_input=n_ap*n_dim, n_output=n_labels).to(device)
 
             optimizer = torch.optim.Adam(
-                model.parameters(), lr=LR_, weight_decay=1e-7
+                model.parameters(), lr=LR_, weight_decay=1e-6
             )
 
             train_subsampler = SubsetRandomSampler(train_ids)
