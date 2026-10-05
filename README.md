@@ -46,6 +46,13 @@ abundances (never in metrics tables / science outputs; checkpoint selection igno
 its loss, it is logged as `val_aux_nll`); `model.heads.chem_condition: none|atm_detached|atm`
 feeds `concat(z, mu_atm[, logvar_atm via cond_logvar])` to H_chem (and to the aux head,
 `aux_condition`, default true). `atm_detached` blocks the chem/aux gradient into H_atm.
+`labels.aux_ref: h|fe` (default h): `fe` trains on [X/Fe] = X_H - fe_h (err = sqrt(e_X^2 + e_Fe^2),
+correlated error part ignored; floor in quadrature; mask_X & mask_Fe; train-split stats computed
+at load time and stored in the checkpoint as `aux_norm`) so the aux head cannot just re-learn [M/H].
+`labels.loss_weighting: per_group|global` (default per_group): each group NLL is normalised by its
+own sum(mask*w), so `weight_atm: 0.5` has NO effect under per_group (all runs so far); `global`
+scales atm by weight_atm and aux by weight_aux after per-group normalisation (chem = 1). Not enabled
+in any config.
 Aux labels live in NEW files next to the dataset, built by
 `scripts/build_aux_labels.py --root data/processed/<name>`:
 `labels_aux.npz` (+`source_id` for an alignment check), `norm_aux.npz` (train-split stats),

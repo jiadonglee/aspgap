@@ -5,14 +5,15 @@
 # Aux element choice (coverage on the full dataset + ASPCAP reliability) is
 # documented in README / PROGRESS. Excluded: ti_2, c_1 (0% coverage in astra
 # v0.6.0); na, v, cu, co, ce, nd, p (weak lines: std[X/Fe] 0.27-0.5 dex, i.e.
-# noise/systematics dominated); cr, k (std[X/Fe] 0.17-0.18 with Teff trends).
+# noise/systematics dominated); cr, k, s (std[X/Fe] 0.17-0.18 with Teff trends).
 inherit: pixel_fusion_snronly.yaml
 
 run:
   name: pixel_fusion_p1
 
 labels:
-  aux: [c_h, n_h, o_h, si_h, s_h, ca_h, ti_h, al_h, mn_h, ni_h]
+  aux: [c_h, n_h, o_h, si_h, ca_h, ti_h, al_h, mn_h, ni_h]
+  aux_ref: fe     # [X/Fe]: carries information beyond the [M/H] correlation
   weight_aux: 0.3
 
 model:

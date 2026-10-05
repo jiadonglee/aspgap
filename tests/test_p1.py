@@ -13,6 +13,7 @@ from aspgapv3.augment import apply_aspgap_input
 from aspgapv3.config import load_config
 from aspgapv3.data.dataset import APOGEEDataset, LabelScaler, save_catalog
 from aspgapv3.data.xp import coef_to_aspgap_input
+from aspgapv3.losses import combine_losses
 from aspgapv3.labels.loaders import build_label_matrix
 from aspgapv3.labels.schema import AUX_CANDIDATES, spec
 from aspgapv3.models.net import build_model
@@ -281,6 +282,11 @@ def test_new_ablation_configs_have_intended_settings():
     p1, ao, co = (c(n) for n in ("pixel_fusion_p1", "pixel_fusion_p1_auxonly",
                                  "pixel_fusion_p1_condonly"))
     assert p1["model"]["heads"]["chem_condition"] == "atm_detached" and p1["labels"]["aux"]
+    assert p1["labels"]["aux"] == ["c_h", "n_h", "o_h", "si_h", "ca_h", "ti_h", "al_h", "mn_h", "ni_h"]
+    assert p1["labels"]["aux_ref"] == ao["labels"]["aux_ref"] == "fe"
+    for n in ("pixel_fusion", "aspgap110", "pixel_fusion_p1", "pixel_fusion_p1_auxonly"):
+        assert c(n)["labels"]["loss_weighting"] == "per_group" and c(n)["labels"]["aux_ref"] in ("h", "fe")
+    assert c("pixel_fusion")["labels"]["aux_ref"] == "h"
     assert ao["model"]["heads"]["chem_condition"] == "none" and ao["labels"]["aux"] == p1["labels"]["aux"]
     assert co["model"]["heads"]["chem_condition"] == "atm_detached" and co["labels"]["aux"] == []
     a = c("aspgap110_aug")
@@ -311,3 +317,63 @@ def test_apply_aspgap_input_degraded_rows_only():
     raw = gn * (10.0 ** ((15.0 - g.double()) * 0.4))[:, None]
     back = coef_to_aspgap_input(raw.float(), g, {"center": np.zeros(110), "scale": np.ones(110)})
     assert torch.allclose(back, gn.float(), atol=1e-4, rtol=1e-4)
+
+
+# ------------------------------------------------------------ aux_ref = fe
+
+def test_aux_ref_fe_targets_errors_mask_and_stats(tmp_path):
+    ya, ma = _toy_root(tmp_path)
+    zm = np.load(tmp_path / "labels.npz")
+    fe = zm["y"][:, 4]
+    zm2 = dict(zm)
+    zm2["mask"] = zm["mask"].copy()
+    zm2["mask"][3, 4] = False                                          # one star lacks [Fe/H]
+    zm2["yerr"] = np.full_like(zm["yerr"], 0.04)
+    np.savez(tmp_path / "labels.npz", **zm2)
+    ds = APOGEEDataset(tmp_path, "train", aux=["o_h", "c_h"], aux_ref="fe")
+    rows = ds.indices
+    exp_y = ya[rows][:, [2, 0]] - fe[rows][:, None]
+    exp_m = ma[rows][:, [2, 0]] & zm2["mask"][rows][:, 4][:, None]
+    assert np.array_equal(ds.mask_aux, exp_m)
+    assert np.allclose(ds.y_aux_raw[exp_m], exp_y[exp_m], atol=1e-5)
+    assert np.allclose(ds.yerr_aux_raw[exp_m], np.sqrt(0.03 ** 2 + 0.04 ** 2), atol=1e-6)
+    assert (~ds.mask_aux[:, 0] | (rows != 3)).all()                    # star 3 masked everywhere
+    # train-split normalisation: normalised targets are ~N(0,1) over masked train entries
+    for k in range(2):
+        v = ds.y_aux[ds.mask_aux[:, k], k]
+        assert abs(v.mean()) < 1e-4 and abs(v.std() - 1) < 1e-3
+    # stats identical for every split instance, files untouched, default stays [X/H]
+    dv = APOGEEDataset(tmp_path, "val", aux=["o_h", "c_h"], aux_ref="fe")
+    assert np.array_equal(dv.aux_scaler.mean, ds.aux_scaler.mean)
+    assert np.allclose(ds.floor_aux * ds.aux_scaler.std, np.sqrt(np.array([.03, .03]) ** 2 + 0.02 ** 2),
+                       atol=1e-6)
+    assert APOGEEDataset(tmp_path, "train", aux=["c_h"]).aux_ref == "h"
+    with pytest.raises(ValueError, match="aux_ref"):
+        APOGEEDataset(tmp_path, "train", aux=["c_h"], aux_ref="mg")
+
+
+# ------------------------------------------------------------ loss weighting
+
+def test_loss_weighting_per_group_unchanged_and_global_reweights():
+    torch.manual_seed(0)
+    net = build_model(scratch_cfg(), n_atm=3, n_chem=3, n_aux=2).eval()   # no dropout
+    out = net(torch.rand(4, 343) + .5)
+    l_atm, l_chem, l_aux = out["mu_atm"].pow(2).mean(), out["mu_chem"].pow(2).mean(), \
+        out["mu_aux"].pow(2).mean()
+    old = l_atm + l_chem + 0.3 * l_aux
+    assert torch.equal(combine_losses(l_atm, l_chem, l_aux, "per_group", 0.5, 0.3), old)
+    assert torch.equal(combine_losses(l_atm, l_chem, l_aux, "per_group", 0.01, 0.3), old)  # weight_atm no-op
+    assert torch.equal(combine_losses(l_atm, l_chem, None, "per_group", 0.5, 0.3), l_atm + l_chem)
+
+    def head_atm_grad(w):
+        net.zero_grad()
+        o = net(torch.ones(4, 343))
+        la, lc = o["mu_atm"].pow(2).mean(), o["mu_chem"].pow(2).mean()
+        combine_losses(la, lc, None, "global", w, 0.3).backward()
+        return net.head_atm.out.weight.grad.clone()
+    g1, g_half = head_atm_grad(1.0), head_atm_grad(0.5)
+    torch.testing.assert_close(g_half, 0.5 * g1)                       # atm gradient scales with weight_atm
+    assert torch.equal(combine_losses(l_atm, l_chem, l_aux, "global", 0.5, 0.3),
+                       0.5 * l_atm + l_chem + 0.3 * l_aux)
+    with pytest.raises(ValueError, match="loss_weighting"):
+        combine_losses(l_atm, l_chem, None, "bogus", 1, 1)

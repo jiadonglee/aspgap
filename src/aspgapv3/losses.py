@@ -42,3 +42,25 @@ def gaussian_nll_reduced(mu: torch.Tensor, logvar: torch.Tensor,
     logvar = logvar.clamp(-8.0, 8.0)
     return 0.5 * (((y - mu) ** 2 / logvar.exp().clamp_min(1e-6) + logvar)
                   * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+LOSS_WEIGHTINGS = ("per_group", "global")
+
+
+def combine_losses(l_atm, l_chem, l_aux, mode: str, weight_atm: float, weight_aux: float):
+    """Total loss from the per-group masked NLLs (each already normalised by its
+    own sum(mask*w), which cancels any uniform per-label weight).
+
+    per_group (default, historical): l_atm + l_chem + weight_aux * l_aux. weight_atm is
+        NOT applied (it was always a no-op); weight_aux is a scalar on the aux term.
+    global: weight_atm * l_atm + 1.0 * l_chem + weight_aux * l_aux, i.e. every group's
+        per-group-normalised loss is scaled by its configured weight (chem = 1), so
+        weight_atm / weight_aux are true relative weights.
+    l_aux may be None (no aux head)."""
+    if mode not in LOSS_WEIGHTINGS:
+        raise ValueError(f"labels.loss_weighting must be one of {LOSS_WEIGHTINGS}, got {mode!r}")
+    wa = weight_atm if mode == "global" else 1.0
+    total = wa * l_atm + l_chem
+    if l_aux is not None:
+        total = total + weight_aux * l_aux
+    return total

@@ -1,5 +1,16 @@
 # PROGRESS
 
+## 2026-10-05 (night, review fixes on p1)
+
+- Aux targets switchable to [X/Fe] (`labels.aux_ref: fe`, set in pixel_fusion_p1 and _auxonly):
+  y = X_H - fe_h, err = sqrt(e_X^2+e_Fe^2) (correlation ignored), mask_X & mask_Fe, floor in quadrature
+  with the [Fe/H] floor; stats from the train split at load time, saved in the checkpoint (`aux_norm`).
+  std[X/Fe] (dex, train): c .133 n .159 o .132 si .087 ca .083 ti .139 al .144 mn .114 ni .059. Because
+  floors are now sqrt(floor_X^2+0.02^2), floor/std is 0.25-0.48 for the tightest elements (ni, ca, si).
+- Default aux set is now 9 elements (S dropped, consistent with K/Cr): c n o si ca ti al mn ni.
+- `labels.loss_weighting: per_group|global` (default per_group = old behaviour; weight_atm is a no-op
+  there). global = w_atm*l_atm + l_chem + w_aux*l_aux. Not enabled in any config.
+
 ## 2026-10-05 (night) — P1 latent bottleneck (cheap), two extra ablations, queue v3b
 
 Branch `p1` (worktree `../aspgap_v3_p1`; the main tree was not touched while the v3 queue runs).

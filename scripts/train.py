@@ -35,7 +35,7 @@ from aspgapv3.config import load_config, resolve_ckpt, save_config  # noqa: E402
 from aspgapv3.data.dataset import APOGEEDataset, input_dim  # noqa: E402
 from aspgapv3.data.sampler import make_sampler  # noqa: E402
 from aspgapv3.data.xp import aspgap_scaler_arrays  # noqa: E402
-from aspgapv3.losses import MaskedHeteroscedasticNLL  # noqa: E402
+from aspgapv3.losses import MaskedHeteroscedasticNLL, combine_losses  # noqa: E402
 from aspgapv3.metrics import metrics_table  # noqa: E402
 from aspgapv3.models.net import build_model  # noqa: E402
 from aspgapv3.models.side import build_side  # noqa: E402
@@ -158,7 +158,8 @@ def main() -> None:
     req_valid = bool(cfg["data"].get("require_xp_valid", False))
     aux_names = list(cfg["labels"].get("aux") or [])      # P1: [] => old behaviour
     dsets = {s: APOGEEDataset(root, split=s, input=inp, noise=need_noise,
-                              require_xp_valid=req_valid, aux=aux_names) for s in
+                              require_xp_valid=req_valid, aux=aux_names,
+                              aux_ref=str(cfg["labels"].get("aux_ref", "h"))) for s in
              ("train", "val", "iid_test", "sky_test")}
     n_labels = len(dsets["train"].labels)
     n_atm = len(cfg["labels"]["atm"])
@@ -191,6 +192,9 @@ def main() -> None:
     w_chem = torch.ones(n_labels - n_atm)
     loss_atm = MaskedHeteroscedasticNLL(w_atm, floors[:n_atm], clamp).to(device)
     loss_chem = MaskedHeteroscedasticNLL(w_chem, floors[n_atm:], clamp).to(device)
+    loss_mode = str(cfg["labels"].get("loss_weighting", "per_group"))
+    w_atm_glob = float(cfg["labels"].get("weight_atm", 0.5))   # used only if loss_weighting=global
+    combine_losses(0.0, 0.0, None, loss_mode, w_atm_glob, 0.0)  # validates the mode early
     loss_aux, w_aux = None, float(cfg["labels"].get("weight_aux", 0.3))
     if aux_names:
         # NLL is normalized by sum(mask*w), so a uniform per-label weight cancels;
@@ -274,12 +278,12 @@ def main() -> None:
             l_chem = loss_chem(out["mu_chem"], out["logvar_chem"],
                                y[:, n_atm:], yerr[:, n_atm:], m[:, n_atm:]) \
                 if n_labels > n_atm else torch.zeros((), device=device)
-            loss = l_atm + l_chem
-            if loss_aux is not None:
-                loss = loss + w_aux * loss_aux(out["mu_aux"], out["logvar_aux"],
-                                               batch["y_aux"].to(device, non_blocking=True),
-                                               batch["yerr_aux"].to(device, non_blocking=True),
-                                               batch["mask_aux"].to(device, non_blocking=True))
+            l_x = loss_aux(out["mu_aux"], out["logvar_aux"],
+                           batch["y_aux"].to(device, non_blocking=True),
+                           batch["yerr_aux"].to(device, non_blocking=True),
+                           batch["mask_aux"].to(device, non_blocking=True)) \
+                if loss_aux is not None else None
+            loss = combine_losses(l_atm, l_chem, l_x, loss_mode, w_atm_glob, w_aux)
             if not torch.isfinite(loss):
                 n_nonfinite += 1
                 continue
@@ -318,6 +322,9 @@ def main() -> None:
             torch.save({"state_dict": net.state_dict(), "config": cfg,
                         "labels": dsets["train"].labels, "n_atm": n_atm,
                         "n_aux": len(aux_names), "aux_labels": aux_names,
+                        "aux_ref": dset.aux_ref,
+                        "aux_norm": ({"mean": dset.aux_scaler.mean, "std": dset.aux_scaler.std}
+                                     if aux_names else None),
                         "epoch": epoch, "val_loss": sel},
                        run_dir / "ckpt_best.pt")
         else:
@@ -329,6 +336,9 @@ def main() -> None:
     torch.save({"state_dict": net.state_dict(), "config": cfg,
                 "labels": dsets["train"].labels, "n_atm": n_atm,
                 "n_aux": len(aux_names), "aux_labels": aux_names,
+                        "aux_ref": dset.aux_ref,
+                        "aux_norm": ({"mean": dset.aux_scaler.mean, "std": dset.aux_scaler.std}
+                                     if aux_names else None),
                 "epoch": epoch, "val_loss": sel},
                run_dir / "ckpt_last.pt")
 

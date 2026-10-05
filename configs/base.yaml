@@ -40,13 +40,17 @@ labels:
     alpha_m: 0.02
     fe_h: 0.02
     mg_h: 0.02
-  # relative weights inside the loss (atm is auxiliary)
+  # NOTE: weight_atm is currently INEFFECTIVE under loss_weighting: per_group (each group's
+  # NLL is normalised by its own sum(mask*w), so a uniform weight cancels). It only acts with
+  # loss_weighting: global. Kept at default per_group so old runs/checkpoints are comparable.
   weight_atm: 0.5
+  loss_weighting: per_group   # per_group | global: total = w_atm*l_atm + l_chem + w_aux*l_aux
   # P1 auxiliary element abundances (needs labels_aux.npz/norm_aux.npz from
   # scripts/build_aux_labels.py). [] => off. Trained only through an auxiliary
   # heteroscedastic head, never reported as science outputs. weight_aux is a
   # scalar on the aux NLL term (the NLL is mask-normalized per term).
   aux: []
+  aux_ref: h             # h: aux targets [X/H]; fe: [X/Fe] = X_H - fe_h (err in quadrature, mask_X & mask_Fe)
   weight_aux: 0.3
 
 model:

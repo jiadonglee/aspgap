@@ -118,7 +118,10 @@ class APOGEEDataset(Dataset):
     def __init__(self, root: str | Path, split: str = "train",
                  input: str = "xp343", labels: list[str] | None = None,
                  noise: bool = False, require_xp_valid: bool = False,
-                 aux: list[str] | None = None):
+                 aux: list[str] | None = None, aux_ref: str = "h"):
+        if aux_ref not in ("h", "fe"):
+            raise ValueError(f"labels.aux_ref must be h|fe, got {aux_ref!r}")
+        self.aux_ref = aux_ref
         self.root = Path(root)
         self.split = split
         self.input = input
@@ -202,15 +205,43 @@ class APOGEEDataset(Dataset):
                 z["source_id"].astype(np.int64), full_sid.astype(np.int64)):
             raise ValueError(f"{fy} is not aligned with catalog row order (source_id mismatch)")
         col = [have.index(n) for n in self.aux_labels]
-        y = z["y"][self.indices][:, col]
-        yerr = z["yerr"][self.indices][:, col]
-        self.mask_aux = z["mask"][self.indices][:, col].astype(bool)
+        if self.aux_ref == "h":                                  # [X/H] as stored
+            y = z["y"][self.indices][:, col]
+            yerr = z["yerr"][self.indices][:, col]
+            self.mask_aux = z["mask"][self.indices][:, col].astype(bool)
+            self.aux_scaler = LabelScaler(sc.mean[col], sc.std[col], sc.floor_norm[col],
+                                          self.aux_labels)
+        else:                                                    # [X/Fe] = X_H - fe_h
+            y_all, e_all, m_all, floor_raw = self._aux_over_fe(z, sc, col, full_cat)
+            tr = (full_cat.sort_values("row")["split"] == "train").to_numpy()
+            self.aux_scaler = LabelScaler.fit(y_all[tr], e_all[tr], m_all[tr], floor_raw,
+                                              self.aux_labels)
+            y, yerr, self.mask_aux = y_all[self.indices], e_all[self.indices], m_all[self.indices]
         self.y_aux_raw, self.yerr_aux_raw = y, yerr
-        self.aux_scaler = LabelScaler(sc.mean[col], sc.std[col], sc.floor_norm[col],
-                                      self.aux_labels)
         self.y_aux = self.aux_scaler.transform_y(y).astype(np.float32)
         self.yerr_aux = self.aux_scaler.transform_err(yerr).astype(np.float32)
         self.floor_aux = self.aux_scaler.floor_norm.astype(np.float32)
+
+    def _aux_over_fe(self, z, sc, col, full_cat):
+        """[X/Fe] targets for ALL catalog rows: y = X_H - fe_h (main label),
+        err = sqrt(e_X^2 + e_Fe^2) -- the correlated part of the two ASPCAP
+        errors is ignored (conservative), floor = sqrt(floor_X^2 + floor_Fe^2)
+        in raw units, mask = mask_X & mask_Fe. Normalisation stats are fit on the
+        TRAIN split (all train rows of the catalog, independent of which split
+        this dataset instance holds) at load time, so every instance agrees."""
+        zm = np.load(self.root / "labels.npz")
+        main = [str(s) for s in zm["labels"]]
+        if "fe_h" not in main:
+            raise ValueError("labels.aux_ref=fe needs fe_h among the main labels")
+        k = main.index("fe_h")
+        msc = LabelScaler.load(self.root)
+        fe, efe, mfe = zm["y"][:, k], zm["yerr"][:, k], zm["mask"][:, k].astype(bool)
+        m_all = z["mask"][:, col].astype(bool) & mfe[:, None]
+        y_all = np.where(m_all, z["y"][:, col] - fe[:, None], np.nan)
+        e_all = np.where(m_all, np.sqrt(z["yerr"][:, col] ** 2 + efe[:, None] ** 2), np.nan)
+        floor_fe = msc.floor_norm[k] * msc.std[k]
+        floor_raw = np.sqrt((sc.floor_norm[col] * sc.std[col]) ** 2 + floor_fe ** 2)
+        return y_all.astype(np.float32), e_all.astype(np.float32), m_all, floor_raw
 
     def __len__(self) -> int:
         return len(self.catalog)
