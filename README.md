@@ -32,16 +32,24 @@ stats token → `[batch, 344, 768]`, mean-pooled over the token axis.
 ## Layout
 
 ```
-configs/            base.yaml + one yaml per benchmark model
+configs/            base.yaml + one yaml per benchmark model; pixel_fusion.yaml
+                    (+ _noaug ablation): SpecCLIP + attn pooling + FiLM side input
+                    + noise-matched augmentation (needs build_xp_noise.py outputs)
 scripts/
   inspect_aspcap.py dump astraAllStarASPCAP HDU2 columns (first contact with the file)
   build_dataset.py  ASPCAP clean -> XP crossmatch -> 343-pixel spectra -> splits -> processed/
   train.py          train any config; masked NLL; binned sampler; Stage A/B/C via yaml
-  evaluate.py       per-label/domain metrics, OOD scores, delta-alpha experiment
+  evaluate.py       per-label/domain metrics, OOD scores, delta-alpha experiment,
+                    degraded-G' mode (error vs fixed G' in {15,16,17,17.5})
+  build_xp_noise.py raw DR3 XP covariances -> xpcov_chol / xp343_sigma / side / noise_bank
+  verify_xp_gaiaxpy.py  sigma + flux cross-check against gaiaxpy calibrate() (env xpbuild)
 src/aspgapv3/
   labels/           schema.py (declarative label registry), loaders.py (DR21-ready)
-  data/             xp.py, dataset.py, splits.py, sampler.py
-  models/           encoders.py, heads.py, net.py
+  data/             xp.py, xpnoise.py (covariance/Cholesky/pixel sigma), dataset.py,
+                    splits.py, sampler.py
+  models/           encoders.py (+AttnPool), heads.py, side.py (FiLM), net.py
+  augment.py        noise-matched augmentation (degrade bright stars to faint noise)
+  amp.py            bf16 autocast policy, fp32 losses
   losses.py metrics.py ood.py
 tests/              synthetic-data tests, no APOGEE download needed
 ```
@@ -58,6 +66,19 @@ coef110n.npy            float32 [n, 110]  old-AspGap network input (G-normalized
 norm.npz                LabelScaler stats (train-set mean/std per label, sigma floors)
 labels.npz              y / yerr / mask in raw units, label order
 manifest.json           versions, cuts, counts, design-matrix provenance
+```
+
+Added by `scripts/build_xp_noise.py` (same row order as xp343.npy):
+
+```
+xpcov_chol.npy          float32 [n, 3080]  packed lower-tri Cholesky of BP|RP coefficient
+                        covariances (absolute DR3 units, C = diag(e) corr diag(e))
+xp343_sigma.npy         float32 [n, 343]   per-pixel 1-sigma / flux_550 (xp343 units)
+side.npy                float32 [n, 4]     G, bp_rp, log10 flux_550 (absolute), log10 SNR_550
+xpcov_valid.npy         bool    [n]        usable covariance (else never augmented)
+noise_bank.npz          ~200 donor Cholesky factors per 0.1 mag G bin (G 10-17.7, random
+                        XP stars, not only APOGEE) + full-XP-catalog G histogram
+xpnoise_meta.json       provenance + verification numbers
 ```
 
 Provenance of the XP coefficients: the local `gxp_chunk_*.hdf5` files store

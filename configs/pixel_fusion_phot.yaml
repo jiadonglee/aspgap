@@ -1,0 +1,11 @@
+# Photometry ablation of pixel_fusion.yaml: also feed Gaia G and BP-RP as side
+# scalars (README non-negotiable 4: photometry is a later ablation, not the main model).
+inherit: pixel_fusion.yaml
+
+run:
+  name: pixel_fusion_phot
+
+model:
+  side:
+    scalars: [g, bp_rp, log_flux550, log_snr550]
+    noise_channel: true

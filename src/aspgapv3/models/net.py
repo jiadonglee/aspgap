@@ -12,21 +12,32 @@ import torch.nn as nn
 
 from .encoders import build_encoder
 from .heads import Trunk, HeteroscedasticHead
+from .side import SideFiLM
 
 
 class XPChemNet(nn.Module):
     def __init__(self, encoder: nn.Module, trunk_dim: int = 256, dropout: float = 0.1,
-                 n_atm: int = 3, n_chem: int = 3, embed_dim: int = 768):
+                 n_atm: int = 3, n_chem: int = 3, embed_dim: int = 768,
+                 side: dict | None = None):
         super().__init__()
         self.encoder = encoder
         self.trunk = Trunk(embed_dim, trunk_dim, dropout)
         self.head_atm = HeteroscedasticHead(trunk_dim, n_atm)
         self.head_chem = HeteroscedasticHead(trunk_dim, n_chem)
         self.n_atm, self.n_chem = n_atm, n_chem
+        side = side or {}
+        self.side = SideFiLM(trunk_dim, list(side.get("scalars", [])),
+                             bool(side.get("noise_channel", False))) \
+            if (side.get("scalars") or side.get("noise_channel")) else None
 
-    def forward(self, x: torch.Tensor) -> dict:
+    def forward(self, x: torch.Tensor, side: dict | None = None) -> dict:
+        """x (B, in_dim); side = {"scalars": (B,S) raw side columns,
+        "sigma": (B,343) xp343_sigma} or None. A model built with a `side`
+        config but called with side=None behaves as the unconditioned model."""
         z768 = self.encoder(x)
         z = self.trunk(z768)
+        if self.side is not None and side is not None:
+            z = self.side(z, x, side)
         mu_a, lv_a = self.head_atm(z)
         mu_c, lv_c = self.head_chem(z)
         return {"z768": z768, "z": z,
@@ -35,11 +46,18 @@ class XPChemNet(nn.Module):
 
     # -- parameter groups: encoder LR << head LR for Stage B/C --------------
 
+    def _pretrained_encoder_params(self) -> list[nn.Parameter]:
+        """Encoder params excluding a freshly initialized pooling module
+        (`encoder.pool`), which trains at the head LR, not the tiny lr_enc."""
+        pool = getattr(self.encoder, "pool", None)
+        pool_ids = {id(p) for p in pool.parameters()} if pool is not None else set()
+        return [p for p in self.encoder.parameters() if id(p) not in pool_ids]
+
     def encoder_parameters(self) -> list[nn.Parameter]:
-        return [p for p in self.encoder.parameters() if p.requires_grad]
+        return [p for p in self._pretrained_encoder_params() if p.requires_grad]
 
     def head_parameters(self) -> list[nn.Parameter]:
-        enc_ids = {id(p) for p in self.encoder.parameters()}
+        enc_ids = {id(p) for p in self._pretrained_encoder_params()}
         return [p for p in self.parameters()
                 if id(p) not in enc_ids and p.requires_grad]
 
@@ -61,4 +79,5 @@ def build_model(cfg: dict, n_atm: int, n_chem: int) -> XPChemNet:
     trunk = cfg["model"]["trunk"]
     return XPChemNet(encoder, trunk_dim=int(trunk["dim"]),
                      dropout=float(trunk["dropout"]),
-                     n_atm=n_atm, n_chem=n_chem, embed_dim=embed_dim)
+                     n_atm=n_atm, n_chem=n_chem, embed_dim=embed_dim,
+                     side=cfg["model"].get("side"))

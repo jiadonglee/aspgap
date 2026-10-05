@@ -1,0 +1,10 @@
+# Ablation of pixel_fusion.yaml: identical model, no noise-matched augmentation.
+inherit: pixel_fusion.yaml
+
+run:
+  name: pixel_fusion_noaug
+
+train:
+  augment:
+    noise_match:
+      p: 0.0

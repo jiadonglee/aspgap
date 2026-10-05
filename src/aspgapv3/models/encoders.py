@@ -29,6 +29,27 @@ def default_specclip_ckpt() -> Path | None:
     return p if p.is_file() else None
 
 
+class AttnPool(nn.Module):
+    """K learnable queries cross-attend over the 344 output tokens; the K
+    attended 768-d vectors are layer-normed, concatenated and projected back to
+    768 (the trunk input dim). Unlike mean pooling the queries can pick the
+    stats token or individual wavelength regions (e.g. Ca triplet, Mg b)."""
+
+    def __init__(self, dim: int = SPECCLIP_EMBED_DIM, n_queries: int = 4, n_heads: int = 2):
+        super().__init__()
+        self.q = nn.Parameter(torch.randn(n_queries, dim) * dim ** -0.5)
+        self.norm_kv = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, n_heads, batch_first=True)
+        self.norm_out = nn.LayerNorm(dim)
+        self.proj = nn.Linear(n_queries * dim, dim)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:        # (B,T,D)
+        kv = self.norm_kv(tokens)
+        q = self.q.unsqueeze(0).expand(len(tokens), -1, -1)
+        o, _ = self.attn(q, kv, kv, need_weights=False)               # (B,K,D)
+        return self.proj(self.norm_out(o).flatten(1))
+
+
 class SpecCLIPEncoder(nn.Module):
     """Pretrained SpecCLIP Gaia-XP encoder, optionally fine-tunable.
 
@@ -46,11 +67,14 @@ class SpecCLIPEncoder(nn.Module):
                        continuum shape that per-pixel standardization inside
                        the backbone otherwise removes; mean pooling dilutes
                        it. Use this for parameter regression.
+      "attn"           AttnPool over the 344 tokens (`attn_queries`,
+                       `attn_heads`) -> 768. Trained at the head LR.
     """
 
     def __init__(self, ckpt_path: str | os.PathLike | None = None,
                  unfreeze_last_k: int = 0, embed_dim: int = SPECCLIP_EMBED_DIM,
-                 pooling: str = "mean"):
+                 pooling: str = "mean", attn_queries: int = 4,
+                 attn_heads: int = 2):
         super().__init__()
         try:
             from specclip.models import SpecFormerControl1_stats
@@ -59,9 +83,11 @@ class SpecCLIPEncoder(nn.Module):
                 "specclip not importable; activate the jepa311 env or add the "
                 "SpecCLIP checkout to PYTHONPATH"
             ) from exc
-        if pooling not in ("mean", "mean_plus_stats"):
+        if pooling not in ("mean", "mean_plus_stats", "attn"):
             raise ValueError(f"unknown pooling {pooling!r}")
         self.pooling = pooling
+        self.pool = AttnPool(SPECCLIP_EMBED_DIM, attn_queries, attn_heads) \
+            if pooling == "attn" else None
         self._out_dim = 2 * SPECCLIP_EMBED_DIM if pooling == "mean_plus_stats" \
             else SPECCLIP_EMBED_DIM
         if embed_dim not in (SPECCLIP_EMBED_DIM, self._out_dim):
@@ -107,6 +133,8 @@ class SpecCLIPEncoder(nn.Module):
             raise ValueError(f"SpecCLIPEncoder expects (B, 343), got {tuple(x.shape)}")
         out = self.backbone(x.unsqueeze(-1))
         emb = out["embedding"]                   # (B, 344, 768)
+        if self.pooling == "attn":
+            return self.pool(emb)
         if self.pooling == "mean":
             return emb.mean(1)                   # SpecCLIP downstream pooling
         return torch.cat([emb.mean(1), emb[:, 0, :]], dim=-1)

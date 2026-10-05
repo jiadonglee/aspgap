@@ -1,5 +1,66 @@
 # PROGRESS
 
+## 2026-10-05 (later) — bad-spectra exclusion, coef110n degradation, queue v3
+
+- `data.require_xp_valid: true` (base.yaml): APOGEEDataset drops rows with
+  `xpcov_valid == False` (non-positive 550 nm flux; 1,628 of 601,291 in the
+  full set) from every split and input type, so all runs share one star set;
+  per-split drop counts are in the `data` log event. `false` = old behaviour.
+- Degraded eval now also covers the `coef110n` baseline: degraded raw
+  coefficients are pushed through the exact forward AspGap transform
+  (divide by 10^((15-G')*0.4), RobustScaler center/scale cached in
+  `aspgap_scaler.npz`); a test reproduces coef110n.npy from coef110.npy.
+- `.gitignore`: `/data/` so `src/aspgapv3/data/` is tracked.
+- Queue `scripts/run_benchmarks_v3.sh` (_r2 runs, log logs/benchmarks_v3.log):
+  pixel_fusion, aspgap110, specclip_ft, pixel_fusion_noaug, specclip_frozen,
+  pixel_fusion_phot, scratch; each followed by evaluate.py with degraded mode.
+
+## 2026-10-05 — pixel-space fusion, XP noise products, noise-matched augmentation (step 1)
+
+Goal: prepare for Gaia DR4 with a pixel-space model that keeps AspGap's two
+real advantages (absolute flux, XP noise covariance) without DR3 coefficient
+scaling, and train on bright stars degraded to faint-star noise.
+
+Built (see README layout): `scripts/build_xp_noise.py`, `data/xpnoise.py`,
+`augment.py` (noise-match), `models/side.py` (FiLM on trunk features, zero-init
+output), `AttnPool` in `SpecCLIPEncoder` (`pooling: attn`), `amp.py`,
+`evaluate.py --degrade-g`, `configs/pixel_fusion{,_noaug}.yaml`, tests.
+
+AMP NaN fix: all transformer runs had `train_loss=nan` under fp16 autocast.
+Now bf16 autocast (`train.amp_dtype`), mu/logvar cast to fp32 and both NLLs
+evaluated outside autocast, non-finite loss / grad-norm batches are skipped and
+counted (`n_nonfinite` per epoch in log.jsonl). Eval uses the same policy.
+Smoke run (pixel_fusion, 2 epochs, 30k test set, batch 128): n_nonfinite = 0.
+
+Noise data (30k test set, 28,517 stars; raw h5 routed by `source_id >> 43`,
+which is what the file-name index range encodes):
+- raw h5 coefficients vs `coef110.npy` (inverted from AspGap chunks): max
+  element-wise relative difference 7.6e-3 (on a near-zero coefficient; p99.99
+  3.8e-5); max |dc| / max_k|c_k| per star = 7.4e-8, median 4e-12.
+- per-pixel sigma vs gaiaxpy 2.1.4 `calibrate()` flux_error (20 stars, env
+  `xpbuild`): max relative difference 7.0e-8, median 2.1e-8; flux agrees to
+  5.9e-8 of star max.
+- Cholesky: 0 of 28,517 stars needed jitter (BP and RP), 0 failures, 0 stars
+  missing in the raw files.
+- Convention found while verifying: gaiaxpy multiplies sqrt(D^T cov_gx D) by
+  `standard_deviation`, so the physical coefficient covariance is
+  std^2 * cov_gx = diag(e) corr diag(e). `../aspgap` XPSampler.sample omits this
+  std^2 (and has w_rp[:,None]*w_rp[:,None] in the RP pixel covariance); neither
+  is reproduced here.
+- Bank: 77 bins x 200 donors (G 10.0-17.7) from a 1% random subsample of the
+  219.1M-star XP catalog; G histogram of the full catalog stored.
+
+Smoke result (2 epochs only, not a science result): see runs/pixel_fusion_smoke
+(summary.md, metrics_degraded_*.csv; the run dir is not committed): [Fe/H] RMSE iid_test 0.25 native ->
+0.28 / 0.32 / 0.41 / 0.47 at G' = 15 / 16 / 17 / 17.5.
+
+Known approximations: donor SED != star SED; donor noise not rescaled within
+its 0.1 mag bin; xp343_sigma treats the 550 nm normalizer as noise-free; bp_rp
+unchanged by augmentation; stars with non-positive post-noise f550 are skipped.
+Note: `.gitignore` has `data/`, which also hides `src/aspgapv3/data/` (never
+tracked); the edits to `data/xp.py`, `data/dataset.py` and new `data/xpnoise.py`
+do not appear in `git status`.
+
 ## 2026-10-04 — full dataset built; benchmark queue launched
 
 Full build: 1,095,480 ASPCAP rows -> 744,371 clean spectra -> 671,817 unique

@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-data/
+/data/
 *.ckpt
 *.pt
 *.npy

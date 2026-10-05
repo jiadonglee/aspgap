@@ -13,6 +13,7 @@ data:
   teff_variant: raw     # raw | calibrated (calibrated embeds XP photometry via IRFM!)
   snr_min: 50.0
   teff_max: 8000.0
+  require_xp_valid: true   # drop rows with xpcov_valid==False from every split/input type (needs build_xp_noise.py); false = old behaviour
   dedupe: max_snr       # one row per gaia_dr3_source_id
   splits:
     train: 0.90
@@ -62,6 +63,7 @@ train:
   warmup_epochs: 3
   grad_clip: 1.0
   amp: true
+  amp_dtype: bf16      # bf16 | fp16 (fp16 gave NaN losses with the SpecCLIP backbone)
   early_stop_patience: 12
   logvar_clamp: [-8.0, 8.0]
   sampler:
@@ -70,5 +72,6 @@ train:
     bins: {teff: 300.0, logg: 0.5, m_h: 0.25}
 
 eval:
+  amp: false           # evaluation in fp32 (comparable to older runs)
   ood_k: 8
   ood_max_train: 200000

@@ -4,7 +4,14 @@ scores, and the conditional chemical-information experiment (XP ->
 Delta[alpha/M], Delta[Mg/Fe] beyond Teff/logg/[M/H] correlations).
 
     python scripts/evaluate.py --run runs/specclip_ft_last2 \
-        [--splits iid_test sky_test] [--which best]
+        [--splits iid_test sky_test] [--which best] [--degrade-g 15 16 17 17.5]
+
+Degraded mode (needs build_xp_noise.py outputs, xp343 input): every star is
+re-run after noise-matched degradation to a fixed G' (stars already fainter
+than G' are left untouched), fixed seed, per-label RMSE / bias /
+calibration_ratio vs G' -> metrics_degraded_<split>.csv. This is the DR4
+validation curve: how the label error grows as the XP noise approaches the
+faint end. Disable with --degrade-g (no values).
 """
 
 from __future__ import annotations
@@ -19,33 +26,52 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from aspgapv3.amp import amp_settings, autocast_ctx, float_outputs  # noqa: E402
+from aspgapv3.augment import NoiseMatchAugment  # noqa: E402
+from aspgapv3.data.xp import aspgap_scaler_arrays, coef_to_aspgap_input  # noqa: E402
 from aspgapv3.data.dataset import APOGEEDataset, load_catalog  # noqa: E402
 from aspgapv3.losses import MaskedHeteroscedasticNLL  # noqa: E402
 from aspgapv3.metrics import (derived_mgfe, fit_conditional_mean,  # noqa: E402
                               metrics_table, residual_recovery_score)
 from aspgapv3.models.net import build_model  # noqa: E402
+from aspgapv3.models.side import build_side  # noqa: E402
 from aspgapv3.ood import LatentKnnOOD  # noqa: E402
 
 
 @torch.no_grad()
-def predict(net, dset: APOGEEDataset, device: str, batch: int = 1024):
+def predict(net, dset: APOGEEDataset, device: str, batch: int = 1024, amp=(False, torch.bfloat16),
+            aug: NoiseMatchAugment | None = None, fixed_g: float | None = None,
+            seed: int = 0, aspgap_sc: dict | None = None):
+    """Returns (mu_raw, sigma_raw, z256, frac_degraded). With `aug`, every
+    batch is degraded to fixed_g (see augment.py) using a seeded generator."""
     net.eval()
     loader = torch.utils.data.DataLoader(dset, batch_size=batch, shuffle=False,
                                          num_workers=2)
-    mus, sigs, zs = [], [], []
+    gen = torch.Generator(device=device).manual_seed(seed) if aug is not None else None
+    mus, sigs, zs, n_aug = [], [], [], 0
     for b in loader:
-        out = net(b["x"].to(device))
-        mu = torch.cat([out["mu_atm"], out["mu_chem"]], 1).float().cpu().numpy()
+        if aug is not None:
+            b = aug(b, gen=gen, fixed_g=fixed_g)
+            n_aug += int(b["aug"].sum())
+        x = b["x"].to(device)
+        if aug is not None and aspgap_sc is not None:
+            # coef110n baseline: re-apply the AspGap input transform to the
+            # degraded raw coefficients at their new G'
+            xa = coef_to_aspgap_input(b["coef"].to(device), b["side"][:, 0].to(device), aspgap_sc)
+            x = torch.where(b["aug"].to(device)[:, None], xa, x)
+        with autocast_ctx(*amp, device=device):
+            out = net(x, build_side(net, b))
+        out = float_outputs(out)
+        mu = torch.cat([out["mu_atm"], out["mu_chem"]], 1).cpu().numpy()
         lv = torch.cat([out["logvar_atm"], out["logvar_chem"]], 1).clamp(-8, 8)
-        sig = lv.exp().sqrt().float().cpu().numpy()
         mus.append(mu)
-        sigs.append(sig)
-        zs.append(out["z"].float().cpu().numpy())
+        sigs.append(lv.exp().sqrt().cpu().numpy())
+        zs.append(out["z"].cpu().numpy())
     mu = np.concatenate(mus)
     sig = np.concatenate(sigs)
     z = np.concatenate(zs)
     mu_r, sig_r = dset.scaler.inverse(mu, sig)
-    return mu_r, sig_r, z
+    return mu_r, sig_r, z, n_aug / max(len(dset), 1)
 
 
 def domain_slices(cat: pd.DataFrame) -> dict[str, np.ndarray]:
@@ -62,6 +88,8 @@ def main() -> None:
     ap.add_argument("--run", required=True)
     ap.add_argument("--splits", nargs="*", default=["iid_test", "sky_test"])
     ap.add_argument("--which", default="best", choices=["best", "last"])
+    ap.add_argument("--degrade-g", nargs="*", type=float, default=[15.0, 16.0, 17.0, 17.5])
+    ap.add_argument("--degrade-seed", type=int, default=1234)
     args = ap.parse_args()
 
     run = Path(args.run)
@@ -78,10 +106,25 @@ def main() -> None:
     root = cfg["data"]["root"]
     cat_all = load_catalog(root)
     inp = cfg["data"].get("input", "xp343")
+    side_cfg = cfg["model"].get("side") or {}
+    use_amp, amp_dtype = amp_settings(cfg, device)
+    amp = (use_amp and bool(cfg.get("eval", {}).get("amp", False)), amp_dtype)   # fp32 by default
+    root_p = Path(root)
+    have_noise = all((root_p / f).is_file() for f in
+                     ("xp343_sigma.npy", "side.npy", "xpcov_valid.npy", "noise_bank.npz"))
+    degrade = bool(args.degrade_g) and inp in ("xp343", "coef110n") and have_noise
+    aspgap_sc = aspgap_scaler_arrays(root) if (degrade and inp == "coef110n") else None
+    need_noise = degrade or bool(side_cfg.get("scalars") or side_cfg.get("noise_channel"))
+    kw = dict(input=inp, labels=labels, noise=need_noise,
+              require_xp_valid=bool(cfg["data"].get("require_xp_valid", False)))
+    aug = NoiseMatchAugment.from_root(root, device=device, p=1.0,
+                                      g_max=float(((cfg["train"].get("augment") or {})
+                                                   .get("noise_match") or {}).get("g_max", 17.65))) \
+        if degrade else None
 
     # latent space for OOD, fit on TRAIN z
-    train_dset = APOGEEDataset(root, "train", input=inp, labels=labels)
-    _, _, z_train = predict(net, train_dset, device)
+    train_dset = APOGEEDataset(root, "train", **kw)
+    _, _, z_train, _ = predict(net, train_dset, device, amp=amp)
     ood = LatentKnnOOD(k=int(cfg["eval"].get("ood_k", 8)),
                        max_train=int(cfg["eval"].get("ood_max_train", 200000)))
     ood.fit(z_train)
@@ -90,9 +133,9 @@ def main() -> None:
                           f"epoch {ckpt['epoch']}, val_loss {ckpt['val_loss']:.4f})\n"]
 
     for split in args.splits:
-        dset = APOGEEDataset(root, split, input=inp, labels=labels)
+        dset = APOGEEDataset(root, split, **kw)
         cat = cat_all[cat_all["split"] == split].reset_index(drop=True)
-        mu, sig, z = predict(net, dset, device)
+        mu, sig, z, _ = predict(net, dset, device, amp=amp)
         y, m = dset.y_raw, dset.mask
 
         table = metrics_table(mu, sig, y, m, labels)
@@ -123,14 +166,41 @@ def main() -> None:
                  mu=mu, sigma=sig, z256=z,
                  ood_score=ood.score(z, device=device))
 
+    # ---- degraded-G' evaluation (DR4 validation curve) ------------------------
+    if args.degrade_g and not degrade:
+        summary.append("\n## Degraded-G' evaluation skipped (needs xp343 input + "
+                       "build_xp_noise.py outputs incl. noise_bank.npz)\n")
+    if degrade:
+        for split in args.splits:
+            dset = APOGEEDataset(root, split, **kw)
+            rows = []
+            for gp in [None] + list(args.degrade_g):
+                mu, sig, _, frac = predict(net, dset, device, amp=amp, aug=aug,
+                                           fixed_g=gp, seed=args.degrade_seed, aspgap_sc=aspgap_sc) \
+                    if gp is not None else (*predict(net, dset, device, amp=amp)[:3], 0.0)
+                t = metrics_table(mu, sig, dset.y_raw, dset.mask, labels)
+                t.insert(0, "g_prime", np.nan if gp is None else gp)
+                t.insert(1, "frac_degraded", frac)
+                rows.append(t)
+            deg = pd.concat(rows, ignore_index=True)
+            deg.to_csv(run / f"metrics_degraded_{split}.csv", index=False)
+            summary.append(f"\n## {split} — degraded to fixed G' (seed {args.degrade_seed}; "
+                           "g_prime NaN = native)\n")
+            cols = ["g_prime", "frac_degraded", "label", "n", "rmse", "bias",
+                    "calibration_ratio"]
+            try:
+                summary.append(deg[cols].to_markdown(index=False, floatfmt=".4f"))
+            except ImportError:
+                summary.append(deg[cols].to_string(index=False, float_format="%.4f"))
+
     # ---- conditional chemical-information experiment (pooled test sets) ----
     summary.append("\n## Conditional chemical information (beyond "
                    "Teff/logg/[M/H] correlations)\n")
     frames = []
     for split in args.splits:
-        dset = APOGEEDataset(root, split, input=inp, labels=labels)
+        dset = APOGEEDataset(root, split, **kw)
         cat = cat_all[cat_all["split"] == split].reset_index(drop=True)
-        mu, sig, _ = predict(net, dset, device)
+        mu, sig, _, _ = predict(net, dset, device, amp=amp)
         frames.append((cat, mu, sig, dset.y_raw, dset.mask))
     cat = pd.concat([f[0] for f in frames], ignore_index=True)
     mu = np.concatenate([f[1] for f in frames])
