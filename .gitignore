@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+*.ckpt
+*.pt
+*.npy
+*.npz
+*.parquet
+
+# version the small text artifacts of each run, never the checkpoints
+runs/**
+!runs/**/
+!runs/**/*.yaml
+!runs/**/*.jsonl
+!runs/**/*.csv
+!runs/**/*.md

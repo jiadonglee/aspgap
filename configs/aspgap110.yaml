@@ -1,0 +1,19 @@
+# Benchmark 1/4: AspGap baseline — 110 BP/RP coefficients into an MLP,
+# same trunk/heads/loss as everything else. Isolates the gain attributable to
+# the SpecCLIP representation rather than to architecture or heads.
+inherit: base.yaml
+
+run:
+  name: aspgap110_stageA
+
+data:
+  input: coef110n   # old AspGap network input: G-normalized + RobustScaler
+
+model:
+  encoder:
+    type: coeff_mlp
+    embed_dim: 768
+    unfreeze_last_k: -1   # fully trainable from scratch
+
+train:
+  lr_enc: 3.0e-4          # whole model at head LR

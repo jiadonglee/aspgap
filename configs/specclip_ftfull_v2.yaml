@@ -1,0 +1,19 @@
+# v2 Stage C: full fine-tune, tiny encoder LR, stats-token pooling.
+# v1 partial FT (last-2 blocks @1e-5) barely moved chemistry over frozen;
+# escalate to all blocks at 3e-6 to protect the pretrained manifold.
+inherit: base.yaml
+
+run:
+  name: specclip_ftfull_v2
+
+model:
+  encoder:
+    type: specclip
+    ckpt_path: null
+    unfreeze_last_k: -1
+    pooling: mean_plus_stats   # -> 1536-d
+
+train:
+  lr_enc: 3.0e-6
+  epochs: 50
+  early_stop_patience: 8

@@ -1,0 +1,74 @@
+# Shared defaults. Every model config inherits these; override per-run with
+# `python scripts/train.py --config X.yaml --set train.epochs=50`.
+
+run:
+  name: base
+  seed: 42
+  out_dir: runs
+  device: cuda          # falls back to cpu automatically
+
+data:
+  root: data/processed/aspcap_v0.6.0
+  input: xp343          # xp343 | coef110
+  teff_variant: raw     # raw | calibrated (calibrated embeds XP photometry via IRFM!)
+  snr_min: 50.0
+  teff_max: 8000.0
+  dedupe: max_snr       # one row per gaia_dr3_source_id
+  splits:
+    train: 0.90
+    val: 0.05
+    test: 0.05
+    sky_test_groups: 32 # spherical-kmeans groups held out whole
+    seed: 42
+
+labels:
+  # Tier 1. teff is an auxiliary target; science metrics are the chem labels.
+  chem: [alpha_m, fe_h, mg_h]
+  atm: [teff, logg, m_h]
+  teff_variant: raw     # duplicated from data.teff_variant if unset
+  # element flag policy: bits 5-8 (censored x3, bad grid edge) always mask;
+  # warn bits 9-11 (warn grid edge / teff / m_h) additionally mask when true
+  mask_warn_bits: true
+  # per-label sigma floors (raw units): keep tiny formal ASPCAP errors from
+  # dominating the NLL; Astra uncertainties are repeat-visit based and
+  # underestimate systematics.
+  sigma_floor:
+    teff: 50.0
+    logg: 0.05
+    m_h: 0.02
+    alpha_m: 0.02
+    fe_h: 0.02
+    mg_h: 0.02
+  # relative weights inside the loss (atm is auxiliary)
+  weight_atm: 0.5
+
+model:
+  encoder:
+    type: specclip      # specclip | scratch | coeff_mlp
+    ckpt_path: null          # resolved to ../gaiaworld/specclip_assets/xp_encoder.ckpt
+    unfreeze_last_k: 0  # Stage A: 0; Stage B: 2; Stage C: -1 (all)
+    embed_dim: 768
+  trunk:
+    dim: 256
+    dropout: 0.1
+
+train:
+  epochs: 60
+  batch_size: 256
+  num_workers: 4
+  lr_head: 3.0e-4
+  lr_enc: 0.0           # 0 => encoder params frozen/absent from optimizer
+  weight_decay: 1.0e-2
+  warmup_epochs: 3
+  grad_clip: 1.0
+  amp: true
+  early_stop_patience: 12
+  logvar_clamp: [-8.0, 8.0]
+  sampler:
+    type: binned        # binned | random
+    power: 0.5          # p_bin ∝ 1 / N_bin^power
+    bins: {teff: 300.0, logg: 0.5, m_h: 0.25}
+
+eval:
+  ood_k: 8
+  ood_max_train: 200000

@@ -1,0 +1,16 @@
+# Benchmark 3/4 + Stage A probe: frozen SpecCLIP, train only 768->256->heads.
+# This number answers: how much APOGEE chemistry is already inside the
+# pretrained latent?
+inherit: base.yaml
+
+run:
+  name: specclip_frozen
+
+model:
+  encoder:
+    type: specclip
+    ckpt_path: null            # -> $ASPGAP_SPECCLIP_CKPT or ../gaiaworld/specclip_assets/xp_encoder.ckpt
+    unfreeze_last_k: 0
+
+train:
+  lr_enc: 0.0
