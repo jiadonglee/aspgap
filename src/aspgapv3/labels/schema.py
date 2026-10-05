@@ -45,6 +45,17 @@ class LabelSpec:
     description: str = ""
 
 
+def _aux_element(name: str, floor: float,
+                 valid_range: tuple[float, float] = (-4.0, 1.5)) -> LabelSpec:
+    """Auxiliary element abundance following the astra naming scheme
+    `<el>_h`, `e_<el>_h`, `<el>_h_flags` (verified for every <el> in HDU2)."""
+    return LabelSpec(
+        name=name, tier=3, group="aux", unit="dex",
+        column=(name, name.upper()), error_column=(f"e_{name}", f"{name}_err"),
+        flag_column=(f"{name}_flags",), sigma_floor=floor, valid_range=valid_range,
+    )
+
+
 LABELS: tuple[LabelSpec, ...] = (
     LabelSpec(
         name="teff", tier=1, group="atm", unit="K",
@@ -150,11 +161,28 @@ LABELS: tuple[LabelSpec, ...] = (
         flag_column=("mn_h_flags",),
         sigma_floor=0.03, valid_range=(-4.0, 1.5),
     ),
+    # ---- Tier 3 / auxiliary-only elements (P1 latent bottleneck) -----------
+    # Never science outputs: trained only through the auxiliary head
+    # (`labels.aux`, weight `labels.weight_aux`). Floors are larger for weak /
+    # blended lines where formal (repeat-visit) errors are unrealistically small.
+    *(_aux_element(*a) for a in (
+        # name   floor  (valid range defaults to (-4, 1.5))
+        ("s_h", 0.05), ("k_h", 0.06), ("na_h", 0.08), ("ti_h", 0.05),
+        ("ti_2_h", 0.08), ("v_h", 0.10), ("cr_h", 0.06), ("co_h", 0.10),
+        ("cu_h", 0.12), ("ce_h", 0.15), ("nd_h", 0.15), ("p_h", 0.15),
+        ("c_1_h", 0.05),
+    )),
 )
 
 _BY_NAME: dict[str, LabelSpec] = {s.name: s for s in LABELS}
 
 TIER1: tuple[str, ...] = tuple(s.name for s in LABELS if s.tier == 1)
+
+
+# Elements usable as auxiliary targets: every registered abundance that is not
+# already a Tier-1 science label (fe_h / mg_h are trained in the chem head).
+AUX_CANDIDATES: tuple[str, ...] = tuple(
+    s.name for s in LABELS if s.tier >= 2 and s.group in ("chem", "aux"))
 
 
 def spec(name: str) -> LabelSpec:

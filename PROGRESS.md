@@ -1,5 +1,35 @@
 # PROGRESS
 
+## 2026-10-05 (night) — P1 latent bottleneck (cheap), two extra ablations, queue v3b
+
+Branch `p1` (worktree `../aspgap_v3_p1`; the main tree was not touched while the v3 queue runs).
+
+- Ablation configs: `aspgap110_aug` (augmentation for the coef110n baseline: shared
+  helper `augment.apply_aspgap_input` used by train.py and evaluate.py; side
+  conditioning stays xp343-only) and `pixel_fusion_snronly` (side scalars [log_snr550]).
+  `scripts/run_benchmarks_v3b.sh` waits for PID 1634664, runs both from the worktree
+  into the main `runs/` (`*_r2`), then degraded evaluation. Also created (new file)
+  `aspgap_scaler.npz` for the full dataset (identical to the _test one).
+- P1 aux labels: 13 more ASPCAP abundances registered (`labels/schema.py`, group "aux",
+  tier 3; astra naming `<el>_h`, `e_<el>_h`, `<el>_h_flags`; same flag/range policy).
+  `scripts/build_aux_labels.py` rebuilt them for `aspcap_v0.6.0_test` and the full set as
+  NEW files (`labels_aux.npz`, `norm_aux.npz`, `aux_manifest.json`), aligned by source_id;
+  the build reproduces labels.npz for the 6 main labels (masks and values) before writing.
+  Coverage (full set, 601k stars, valid label after flags): ni/al/si/c/k/ca/o/cr/mn ~90.5-91%,
+  ce/s/nd/co 89.5-90.3, p 88.8, v 88.4, na 87.7, ti 87.6, n 72.6, cu 63.1, ti_2 and c_1 0%
+  (columns exist but are all NaN in v0.6.0). Reliability screen (std of [X/Fe] vs formal error):
+  na 0.31, v 0.35, co 0.31, cu 0.51, ce 0.27, nd 0.27, p 0.40 dex are far above Galactic
+  scatter => noise/systematics dominated; cr (0.18) and k (0.17) show Teff trends. Default aux set
+  (10): c n o si s ca ti al mn ni. Floors 0.03-0.15 dex per element (weak lines larger).
+- Hierarchical head: `model.heads.chem_condition none|atm_detached|atm`, `cond_logvar`,
+  `aux_condition`. `none` is bit-identical to the old forward (tested, same state_dict keys).
+  Aux head loss: `loss = l_atm + l_chem + weight_aux * l_aux` (scalar on the term, because
+  the masked NLL is normalised by sum(mask*w) so a uniform per-label weight cancels).
+  NOTE (pre-existing, unchanged): the same cancellation makes `labels.weight_atm: 0.5` a no-op.
+  Checkpoint selection (`val_select`) excludes the aux loss, so it stays comparable to old runs.
+- Configs: `pixel_fusion_p1`, `_p1_auxonly`, `_p1_condonly` (all side scalars [log_snr550]).
+- Smoke (2 epochs, 30k test set, shared GPU) in the report; not science. Full P1 training not launched.
+
 ## 2026-10-05 (later) — bad-spectra exclusion, coef110n degradation, queue v3
 
 - `data.require_xp_valid: true` (base.yaml): APOGEEDataset drops rows with

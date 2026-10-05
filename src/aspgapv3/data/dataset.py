@@ -13,6 +13,8 @@ APOGEEDataset.__getitem__ returns a dict:
     yerr   float32 [K]        normalized 1-sigma errors
     mask   bool    [K]
     index  int
+  with `aux=[...]` (labels_aux.npz + norm_aux.npz, see build_aux_labels.py):
+    y_aux, yerr_aux  float32 [A] normalized; mask_aux bool [A]
   and, with `noise=True` (needs scripts/build_xp_noise.py outputs):
     sigma  float32 [343]      xp343_sigma (per-pixel 1-sigma, xp343 units)
     side   float32 [4]        phot_g_mean_mag, bp_rp, log10_flux550, log10_snr550
@@ -96,14 +98,14 @@ class LabelScaler:
     def inverse(self, mu: np.ndarray, sigma: np.ndarray):
         return mu * self.std + self.mean, sigma * self.std
 
-    def save(self, root: str | Path) -> None:
-        np.savez(Path(root) / "norm.npz", mean=self.mean, std=self.std,
+    def save(self, root: str | Path, name: str = "norm.npz") -> None:
+        np.savez(Path(root) / name, mean=self.mean, std=self.std,
                  floor_norm=self.floor_norm,
                  labels=np.array(self.labels, dtype="U16"))
 
     @classmethod
-    def load(cls, root: str | Path) -> "LabelScaler":
-        z = np.load(Path(root) / "norm.npz", allow_pickle=False)
+    def load(cls, root: str | Path, name: str = "norm.npz") -> "LabelScaler":
+        z = np.load(Path(root) / name, allow_pickle=False)
         return cls(z["mean"], z["std"], z["floor_norm"],
                    [str(s) for s in z["labels"]])
 
@@ -115,7 +117,8 @@ class APOGEEDataset(Dataset):
 
     def __init__(self, root: str | Path, split: str = "train",
                  input: str = "xp343", labels: list[str] | None = None,
-                 noise: bool = False, require_xp_valid: bool = False):
+                 noise: bool = False, require_xp_valid: bool = False,
+                 aux: list[str] | None = None):
         self.root = Path(root)
         self.split = split
         self.input = input
@@ -171,8 +174,43 @@ class APOGEEDataset(Dataset):
         self.floor_norm = scaler.floor_norm[[col[n] for n in self.labels]] \
             .astype(np.float32)
 
+        # auxiliary labels (P1): separate files, never part of `labels` / metrics
+        self.aux_labels: list[str] = list(aux or [])
+        if self.aux_labels:
+            self._load_aux(cat)
+
         # per-label sample weights can be attached later by the trainer
         self.label_weights = np.ones(len(self.labels), dtype=np.float32)
+
+    def _load_aux(self, full_cat: pd.DataFrame) -> None:
+        """labels_aux.npz + norm_aux.npz (scripts/build_aux_labels.py), aligned
+        to the catalog row order and checked against it via source_id."""
+        fy, fn = self.root / "labels_aux.npz", self.root / "norm_aux.npz"
+        for f in (fy, fn):
+            if not f.is_file():
+                raise FileNotFoundError(
+                    f"labels.aux={self.aux_labels} configured but {f} is missing; "
+                    f"run scripts/build_aux_labels.py --root {self.root}")
+        z = np.load(fy, allow_pickle=False)
+        sc = LabelScaler.load(self.root, "norm_aux.npz")
+        have = [str(s) for s in z["labels"]]
+        missing = [n for n in self.aux_labels if n not in have]
+        if missing:
+            raise ValueError(f"aux labels {missing} not in {fy} (available: {have})")
+        full_sid = full_cat.sort_values("row")["source_id"].to_numpy()
+        if len(full_sid) != len(z["y"]) or not np.array_equal(
+                z["source_id"].astype(np.int64), full_sid.astype(np.int64)):
+            raise ValueError(f"{fy} is not aligned with catalog row order (source_id mismatch)")
+        col = [have.index(n) for n in self.aux_labels]
+        y = z["y"][self.indices][:, col]
+        yerr = z["yerr"][self.indices][:, col]
+        self.mask_aux = z["mask"][self.indices][:, col].astype(bool)
+        self.y_aux_raw, self.yerr_aux_raw = y, yerr
+        self.aux_scaler = LabelScaler(sc.mean[col], sc.std[col], sc.floor_norm[col],
+                                      self.aux_labels)
+        self.y_aux = self.aux_scaler.transform_y(y).astype(np.float32)
+        self.yerr_aux = self.aux_scaler.transform_err(yerr).astype(np.float32)
+        self.floor_aux = self.aux_scaler.floor_norm.astype(np.float32)
 
     def __len__(self) -> int:
         return len(self.catalog)
@@ -186,6 +224,11 @@ class APOGEEDataset(Dataset):
                      "side": torch.from_numpy(np.array(self.side[row], np.float32)),
                      "coef": torch.from_numpy(np.array(self.coef[row], np.float32)),
                      "valid": torch.tensor(bool(self.valid[row]))}
+        if self.aux_labels:
+            extra = {**extra,
+                     "y_aux": torch.from_numpy(np.nan_to_num(self.y_aux[i])),
+                     "yerr_aux": torch.from_numpy(np.nan_to_num(self.yerr_aux[i])),
+                     "mask_aux": torch.from_numpy(self.mask_aux[i])}
         return {
             **extra,
             "x": torch.from_numpy(np.array(xi, dtype=np.float32, copy=True)),

@@ -27,8 +27,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aspgapv3.amp import amp_settings, autocast_ctx, float_outputs  # noqa: E402
-from aspgapv3.augment import NoiseMatchAugment  # noqa: E402
-from aspgapv3.data.xp import aspgap_scaler_arrays, coef_to_aspgap_input  # noqa: E402
+from aspgapv3.augment import NoiseMatchAugment, apply_aspgap_input  # noqa: E402
+from aspgapv3.data.xp import aspgap_scaler_arrays  # noqa: E402
 from aspgapv3.data.dataset import APOGEEDataset, load_catalog  # noqa: E402
 from aspgapv3.losses import MaskedHeteroscedasticNLL  # noqa: E402
 from aspgapv3.metrics import (derived_mgfe, fit_conditional_mean,  # noqa: E402
@@ -57,8 +57,7 @@ def predict(net, dset: APOGEEDataset, device: str, batch: int = 1024, amp=(False
         if aug is not None and aspgap_sc is not None:
             # coef110n baseline: re-apply the AspGap input transform to the
             # degraded raw coefficients at their new G'
-            xa = coef_to_aspgap_input(b["coef"].to(device), b["side"][:, 0].to(device), aspgap_sc)
-            x = torch.where(b["aug"].to(device)[:, None], xa, x)
+            x = apply_aspgap_input(b, aspgap_sc, device)
         with autocast_ctx(*amp, device=device):
             out = net(x, build_side(net, b))
         out = float_outputs(out)
@@ -100,7 +99,8 @@ def main() -> None:
     labels = ckpt["labels"]
     n_atm = ckpt["n_atm"]
 
-    net = build_model(cfg, n_atm=n_atm, n_chem=len(labels) - n_atm).to(device)
+    net = build_model(cfg, n_atm=n_atm, n_chem=len(labels) - n_atm,
+                      n_aux=int(ckpt.get("n_aux", 0))).to(device)
     net.load_state_dict(ckpt["state_dict"])
 
     root = cfg["data"]["root"]

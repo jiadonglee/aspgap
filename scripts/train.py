@@ -30,10 +30,11 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aspgapv3.amp import amp_settings, autocast_ctx, float_outputs  # noqa: E402
-from aspgapv3.augment import NoiseMatchAugment  # noqa: E402
+from aspgapv3.augment import NoiseMatchAugment, apply_aspgap_input  # noqa: E402
 from aspgapv3.config import load_config, resolve_ckpt, save_config  # noqa: E402
 from aspgapv3.data.dataset import APOGEEDataset, input_dim  # noqa: E402
 from aspgapv3.data.sampler import make_sampler  # noqa: E402
+from aspgapv3.data.xp import aspgap_scaler_arrays  # noqa: E402
 from aspgapv3.losses import MaskedHeteroscedasticNLL  # noqa: E402
 from aspgapv3.metrics import metrics_table  # noqa: E402
 from aspgapv3.models.net import build_model  # noqa: E402
@@ -52,11 +53,15 @@ def lr_at(epoch: int, cfg: dict) -> float:
 
 @torch.no_grad()
 def evaluate(net, loader, device, loss_atm, loss_chem,
-             amp: tuple[bool, torch.dtype] = (False, torch.bfloat16)) -> tuple[float, float, dict]:
-    """Returns (total NLL, chem NLL, per-label raw-unit metrics df). Same
-    precision policy as training: forward under autocast, losses in fp32."""
+             amp: tuple[bool, torch.dtype] = (False, torch.bfloat16),
+             loss_aux=None, extra: dict | None = None) -> tuple[float, float, dict]:
+    """Returns (total NLL = atm + chem, chem NLL, per-label raw-unit metrics df).
+    Same precision policy as training: forward under autocast, losses in fp32.
+    The auxiliary-head NLL (if `loss_aux` and the model has an aux head) is NOT
+    part of the returned total (checkpoint selection stays chem/atm-only); it is
+    written to extra["aux_nll"]."""
     net.eval()
-    tot, tot_c, n = 0.0, 0.0, 0
+    tot, tot_c, tot_x, n = 0.0, 0.0, 0.0, 0
     mus, sigmas, ys, ms = [], [], [], []
     for batch in loader:
         x = batch["x"].to(device, non_blocking=True)
@@ -72,6 +77,9 @@ def evaluate(net, loader, device, loss_atm, loss_chem,
                            y[:, net.n_atm:], yerr[:, net.n_atm:],
                            m[:, net.n_atm:]) if net.n_chem else 0.0
         bs = len(x)
+        if loss_aux is not None and net.n_aux:
+            tot_x += float(loss_aux(out["mu_aux"], out["logvar_aux"], batch["y_aux"].to(device),
+                                    batch["yerr_aux"].to(device), batch["mask_aux"].to(device))) * bs
         tot += float(l_all) * bs
         tot_c += float(l_chem) * bs
         n += bs
@@ -91,6 +99,8 @@ def evaluate(net, loader, device, loss_atm, loss_chem,
     mu_r, sig_r = scaler.inverse(mu, sig)
     y_r, m_r = loader.dataset.y_raw, loader.dataset.mask
     table = metrics_table(mu_r, sig_r, y_r, m_r, scaler.labels)
+    if extra is not None:
+        extra["aux_nll"] = tot_x / max(n, 1)
     return tot / max(n, 1), tot_c / max(n, 1), table
 
 
@@ -136,12 +146,19 @@ def main() -> None:
     side_cfg = cfg["model"].get("side") or {}
     aug_cfg = (cfg["train"].get("augment") or {}).get("noise_match") or {}
     p_aug = float(aug_cfg.get("p", 0.0))
-    need_noise = bool(side_cfg.get("scalars") or side_cfg.get("noise_channel")) or p_aug > 0
-    if need_noise and inp != "xp343":
-        raise ValueError("side conditioning / noise augmentation need data.input=xp343")
+    use_side = bool(side_cfg.get("scalars") or side_cfg.get("noise_channel"))
+    need_noise = use_side or p_aug > 0
+    if use_side and inp != "xp343":
+        raise ValueError("side conditioning needs data.input=xp343")
+    if p_aug > 0 and inp not in ("xp343", "coef110n"):
+        raise ValueError("noise augmentation needs data.input=xp343 or coef110n")
+    # coef110n: the augmenter degrades the raw coef110; the network input is
+    # rebuilt with the cached AspGap forward transform (aspgap_scaler.npz)
+    aspgap_sc = aspgap_scaler_arrays(root) if (p_aug > 0 and inp == "coef110n") else None
     req_valid = bool(cfg["data"].get("require_xp_valid", False))
+    aux_names = list(cfg["labels"].get("aux") or [])      # P1: [] => old behaviour
     dsets = {s: APOGEEDataset(root, split=s, input=inp, noise=need_noise,
-                              require_xp_valid=req_valid) for s in
+                              require_xp_valid=req_valid, aux=aux_names) for s in
              ("train", "val", "iid_test", "sky_test")}
     n_labels = len(dsets["train"].labels)
     n_atm = len(cfg["labels"]["atm"])
@@ -149,7 +166,7 @@ def main() -> None:
          "iid_test": len(dsets["iid_test"]), "sky_test": len(dsets["sky_test"]),
          "input": inp, "require_xp_valid": req_valid,
          "n_dropped_invalid": {s: d.n_dropped_invalid for s, d in dsets.items()},
-         "n_labels": n_labels, "labels": dsets["train"].labels})
+         "n_labels": n_labels, "labels": dsets["train"].labels, "aux": aux_names})
 
     sampler = make_sampler(dsets["train"], cfg["train"].get("sampler", {}))
     train_loader = DataLoader(
@@ -162,7 +179,7 @@ def main() -> None:
                                        num_workers=2, pin_memory=(device == "cuda"))
 
     # ---- model / loss ------------------------------------------------------
-    net = build_model(cfg, n_atm=n_atm, n_chem=n_labels - n_atm).to(device)
+    net = build_model(cfg, n_atm=n_atm, n_chem=n_labels - n_atm, n_aux=len(aux_names)).to(device)
     n_enc = sum(p.numel() for p in net.encoder_parameters())
     log({"event": "model", "encoder_trainable_params": n_enc,
          "total_params": sum(p.numel() for p in net.parameters())})
@@ -174,6 +191,12 @@ def main() -> None:
     w_chem = torch.ones(n_labels - n_atm)
     loss_atm = MaskedHeteroscedasticNLL(w_atm, floors[:n_atm], clamp).to(device)
     loss_chem = MaskedHeteroscedasticNLL(w_chem, floors[n_atm:], clamp).to(device)
+    loss_aux, w_aux = None, float(cfg["labels"].get("weight_aux", 0.3))
+    if aux_names:
+        # NLL is normalized by sum(mask*w), so a uniform per-label weight cancels;
+        # weight_aux is therefore applied as a scalar on the aux-loss term below.
+        loss_aux = MaskedHeteroscedasticNLL(torch.ones(len(aux_names)),
+                                            torch.as_tensor(dset.floor_aux), clamp).to(device)
 
     if net.side is not None and net.side.scalars:           # train-split stats
         cols = net.side.cols
@@ -198,7 +221,12 @@ def main() -> None:
         # fixed-seed degraded val set (G' from the catalog histogram, p=1), built
         # once so every epoch scores the identical noisy stars
         gen = torch.Generator(device=device).manual_seed(seed + 1)
-        cached = [augmenter(b, gen=gen, p=1.0) for b in eval_loader("val")]
+        cached = []
+        for b in eval_loader("val"):
+            b = augmenter(b, gen=gen, p=1.0)
+            if aspgap_sc is not None:
+                b["x"] = apply_aspgap_input(b, aspgap_sc, device)
+            cached.append(b)
         val_deg_loader = CachedLoader(cached, dsets["val"])
         log({"event": "val_degraded", "frac_degraded":
              float(sum(int(b["aug"].sum()) for b in cached)) / len(dsets["val"]),
@@ -230,6 +258,8 @@ def main() -> None:
                 batch = augmenter(batch)
                 n_aug += int(batch["aug"].sum())
                 n_seen += len(batch["aug"])
+                if aspgap_sc is not None:
+                    batch["x"] = apply_aspgap_input(batch, aspgap_sc, device)
             x = batch["x"].to(device, non_blocking=True)
             y = batch["y"].to(device, non_blocking=True)
             yerr = batch["yerr"].to(device, non_blocking=True)
@@ -245,6 +275,11 @@ def main() -> None:
                                y[:, n_atm:], yerr[:, n_atm:], m[:, n_atm:]) \
                 if n_labels > n_atm else torch.zeros((), device=device)
             loss = l_atm + l_chem
+            if loss_aux is not None:
+                loss = loss + w_aux * loss_aux(out["mu_aux"], out["logvar_aux"],
+                                               batch["y_aux"].to(device, non_blocking=True),
+                                               batch["yerr_aux"].to(device, non_blocking=True),
+                                               batch["mask_aux"].to(device, non_blocking=True))
             if not torch.isfinite(loss):
                 n_nonfinite += 1
                 continue
@@ -260,12 +295,14 @@ def main() -> None:
             scaler_amp.update()
             tr_loss += float(loss)
             nb += 1
-        val, val_chem, table = evaluate(net, eval_loader("val"), device, loss_atm, loss_chem, amp)
+        ex = {}
+        val, val_chem, table = evaluate(net, eval_loader("val"), device, loss_atm, loss_chem, amp,
+                                        loss_aux=loss_aux, extra=ex)
         sel = val
-        extra = {}
+        extra = {"val_aux_nll": ex["aux_nll"]} if aux_names else {}
         if val_deg_loader is not None:
             val_d, _, table_d = evaluate(net, val_deg_loader, device, loss_atm, loss_chem, amp)
-            extra = {"val_loss_degraded": val_d,
+            extra = {**extra, "val_loss_degraded": val_d,
                      "val_rmse_degraded": {r0["label"]: round(r0["rmse"], 5)
                                            for _, r0 in table_d.iterrows() if r0.get("n", 0) > 0}}
             sel = {"clean": val, "degraded": val_d, "mean": 0.5 * (val + val_d)}[select_on]
@@ -280,6 +317,7 @@ def main() -> None:
             best_val, bad_epochs = sel, 0
             torch.save({"state_dict": net.state_dict(), "config": cfg,
                         "labels": dsets["train"].labels, "n_atm": n_atm,
+                        "n_aux": len(aux_names), "aux_labels": aux_names,
                         "epoch": epoch, "val_loss": sel},
                        run_dir / "ckpt_best.pt")
         else:
@@ -290,6 +328,7 @@ def main() -> None:
 
     torch.save({"state_dict": net.state_dict(), "config": cfg,
                 "labels": dsets["train"].labels, "n_atm": n_atm,
+                "n_aux": len(aux_names), "aux_labels": aux_names,
                 "epoch": epoch, "val_loss": sel},
                run_dir / "ckpt_last.pt")
 

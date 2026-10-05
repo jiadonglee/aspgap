@@ -1,0 +1,20 @@
+# P1: AspGap-style latent bottleneck, cheap version. pixel_fusion_snronly +
+#  (a) auxiliary element abundances (richer supervision than 6 labels) and
+#  (b) hierarchical chem head: H_chem sees concat(z, detached mu_atm), so
+#      [alpha/M] need not be re-inferred from its correlation with [M/H].
+# Aux element choice (coverage on the full dataset + ASPCAP reliability) is
+# documented in README / PROGRESS. Excluded: ti_2, c_1 (0% coverage in astra
+# v0.6.0); na, v, cu, co, ce, nd, p (weak lines: std[X/Fe] 0.27-0.5 dex, i.e.
+# noise/systematics dominated); cr, k (std[X/Fe] 0.17-0.18 with Teff trends).
+inherit: pixel_fusion_snronly.yaml
+
+run:
+  name: pixel_fusion_p1
+
+labels:
+  aux: [c_h, n_h, o_h, si_h, s_h, ca_h, ti_h, al_h, mn_h, ni_h]
+  weight_aux: 0.3
+
+model:
+  heads:
+    chem_condition: atm_detached

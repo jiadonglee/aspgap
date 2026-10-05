@@ -29,6 +29,28 @@ sample the BP/RP system on `np.arange(336, 1021, 2)` nm (343 points), divide by
 the flux at 550 nm (index 107), feed `[batch, 343, 1]`; the encoder prepends a
 stats token → `[batch, 344, 768]`, mean-pooled over the token axis.
 
+## P1 / ablations (branch `p1`)
+
+| config | what |
+|--------|------|
+| `aspgap110_aug.yaml` | aspgap110 + noise-matched augmentation (p=0.5, select_on mean); `coef110n` input rebuilt from the degraded raw coefficients with the cached AspGap forward transform (`aspgap_scaler.npz`) |
+| `pixel_fusion_snronly.yaml` | pixel_fusion with side scalars `[log_snr550]` only (drops `log_flux550`, a possible selection-function shortcut) |
+| `pixel_fusion_p1.yaml` | snronly + auxiliary element labels (`labels.aux`, weight `labels.weight_aux`=0.3) + `model.heads.chem_condition: atm_detached` |
+| `pixel_fusion_p1_auxonly.yaml` / `_condonly.yaml` | the two halves of the P1 ablation |
+
+`scripts/run_benchmarks_v3b.sh` waits for the v3 queue, then runs the first two (from the p1 worktree).
+
+P1 switches (all off by default; old configs/checkpoints are bit-identical):
+`labels.aux: [c_h, ...]` trains an auxiliary heteroscedastic head on extra ASPCAP
+abundances (never in metrics tables / science outputs; checkpoint selection ignores
+its loss, it is logged as `val_aux_nll`); `model.heads.chem_condition: none|atm_detached|atm`
+feeds `concat(z, mu_atm[, logvar_atm via cond_logvar])` to H_chem (and to the aux head,
+`aux_condition`, default true). `atm_detached` blocks the chem/aux gradient into H_atm.
+Aux labels live in NEW files next to the dataset, built by
+`scripts/build_aux_labels.py --root data/processed/<name>`:
+`labels_aux.npz` (+`source_id` for an alignment check), `norm_aux.npz` (train-split stats),
+`aux_manifest.json` (coverage). Registry: `labels/schema.py` (`AUX_CANDIDATES`, floors).
+
 ## Layout
 
 ```
@@ -41,6 +63,7 @@ scripts/
   train.py          train any config; masked NLL; binned sampler; Stage A/B/C via yaml
   evaluate.py       per-label/domain metrics, OOD scores, delta-alpha experiment,
                     degraded-G' mode (error vs fixed G' in {15,16,17,17.5})
+  build_aux_labels.py  auxiliary element labels -> labels_aux.npz / norm_aux.npz (new files only)
   build_xp_noise.py raw DR3 XP covariances -> xpcov_chol / xp343_sigma / side / noise_bank
   verify_xp_gaiaxpy.py  sigma + flux cross-check against gaiaxpy calibrate() (env xpbuild)
 src/aspgapv3/

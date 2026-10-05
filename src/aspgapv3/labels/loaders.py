@@ -234,3 +234,15 @@ def load_and_clean(path: str, label_names: list[str], snr_min: float = 50.0,
     stats["teff_variant"] = teff_variant
     return {"df": df, "y": y, "yerr": yerr, "mask": mask,
             "resolved": resolved, "stats": stats}
+
+
+def dedupe_max_snr(df: pd.DataFrame, sid_col: str) -> np.ndarray:
+    """Positions (sorted) of the max-S/N visit per source_id. Mirrors the
+    dedupe in scripts/build_dataset.py exactly (same sort, same tie-break) so
+    that independently rebuilt label tables line up with the processed
+    catalog; `scripts/build_aux_labels.py` verifies this against labels.npz."""
+    snr = pd.to_numeric(df["snr"], errors="coerce").to_numpy(float)
+    order = pd.DataFrame({"sid": df[sid_col].to_numpy(), "snr": snr,
+                          "pos": df.index.to_numpy()}) \
+        .sort_values("snr", ascending=False).drop_duplicates("sid", keep="first")
+    return np.sort(order["pos"].to_numpy())

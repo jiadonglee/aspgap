@@ -1,0 +1,15 @@
+# AspGap baseline + noise-matched augmentation (ablation: is the augmentation
+# gain architecture-independent?). coef110n input; the augmenter degrades the
+# raw coef110 and the cached AspGap forward transform rebuilds the network input.
+inherit: aspgap110.yaml
+
+run:
+  name: aspgap110_aug
+
+train:
+  select_on: mean            # clean | degraded | mean (checkpoint + early stop)
+  augment:
+    noise_match:
+      p: 0.5
+      g_target: catalog_hist
+      g_max: 17.65

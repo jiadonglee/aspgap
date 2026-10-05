@@ -41,7 +41,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .data.xp import N_COEF, NORM_INDEX
+from .data.xp import N_COEF, NORM_INDEX, coef_to_aspgap_input
 from .data.xpnoise import N_TRI, pixel_sigma_abs, unpack_star
 
 G_LO = 10.0      # first bank bin edge
@@ -171,3 +171,14 @@ class NoiseMatchAugment:
         out["side"] = torch.where(m, side_new.float(), side.float())
         out["aug"] = sel
         return out
+
+
+def apply_aspgap_input(batch: dict, aspgap_sc: dict, device) -> torch.Tensor:
+    """Network input `x` (B,110) for the coef110n baseline after augmentation.
+
+    Degraded rows (batch["aug"]) get the AspGap forward transform of their
+    degraded raw coefficients at the new G' (side col 0); undegraded rows keep
+    the cached coef110n `x` verbatim. Shared by train.py (training batches and
+    the degraded val set) and evaluate.py (degraded-G' mode)."""
+    xa = coef_to_aspgap_input(batch["coef"].to(device), batch["side"][:, 0].to(device), aspgap_sc)
+    return torch.where(batch["aug"].to(device)[:, None], xa, batch["x"].to(device))

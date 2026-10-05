@@ -1,0 +1,9 @@
+# P1 ablation: auxiliary labels only (no conditioning).
+inherit: pixel_fusion_p1.yaml
+
+run:
+  name: pixel_fusion_p1_auxonly
+
+model:
+  heads:
+    chem_condition: none

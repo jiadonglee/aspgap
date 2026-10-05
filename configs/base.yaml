@@ -42,6 +42,12 @@ labels:
     mg_h: 0.02
   # relative weights inside the loss (atm is auxiliary)
   weight_atm: 0.5
+  # P1 auxiliary element abundances (needs labels_aux.npz/norm_aux.npz from
+  # scripts/build_aux_labels.py). [] => off. Trained only through an auxiliary
+  # heteroscedastic head, never reported as science outputs. weight_aux is a
+  # scalar on the aux NLL term (the NLL is mask-normalized per term).
+  aux: []
+  weight_aux: 0.3
 
 model:
   encoder:
@@ -52,6 +58,10 @@ model:
   trunk:
     dim: 256
     dropout: 0.1
+  heads:
+    chem_condition: none   # none | atm_detached | atm: H_chem sees concat(z, mu_atm[, logvar_atm])
+    cond_logvar: false     # also feed logvar_atm to the conditioned head(s)
+    aux_condition: true    # aux head gets the same conditioning as H_chem (if chem_condition != none)
 
 train:
   epochs: 60
