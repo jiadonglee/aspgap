@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from aspgapv3.amp import amp_settings, autocast_ctx, float_outputs  # noqa: E402
 from aspgapv3.augment import NoiseMatchAugment, apply_aspgap_input  # noqa: E402
 from aspgapv3.data.xp import aspgap_scaler_arrays  # noqa: E402
-from aspgapv3.data.dataset import APOGEEDataset, load_catalog  # noqa: E402
+from aspgapv3.data.dataset import APOGEEDataset  # noqa: E402
 from aspgapv3.losses import MaskedHeteroscedasticNLL  # noqa: E402
 from aspgapv3.metrics import (derived_mgfe, fit_conditional_mean,  # noqa: E402
                               metrics_table, residual_recovery_score)
@@ -104,7 +104,6 @@ def main() -> None:
     net.load_state_dict(ckpt["state_dict"])
 
     root = cfg["data"]["root"]
-    cat_all = load_catalog(root)
     inp = cfg["data"].get("input", "xp343")
     side_cfg = cfg["model"].get("side") or {}
     use_amp, amp_dtype = amp_settings(cfg, device)
@@ -134,7 +133,7 @@ def main() -> None:
 
     for split in args.splits:
         dset = APOGEEDataset(root, split, **kw)
-        cat = cat_all[cat_all["split"] == split].reset_index(drop=True)
+        cat = dset.catalog      # already filtered (require_xp_valid) like the predictions
         mu, sig, z, _ = predict(net, dset, device, amp=amp)
         y, m = dset.y_raw, dset.mask
 
@@ -199,7 +198,7 @@ def main() -> None:
     frames = []
     for split in args.splits:
         dset = APOGEEDataset(root, split, **kw)
-        cat = cat_all[cat_all["split"] == split].reset_index(drop=True)
+        cat = dset.catalog      # already filtered (require_xp_valid) like the predictions
         mu, sig, _, _ = predict(net, dset, device, amp=amp)
         frames.append((cat, mu, sig, dset.y_raw, dset.mask))
     cat = pd.concat([f[0] for f in frames], ignore_index=True)
@@ -211,7 +210,7 @@ def main() -> None:
 
     # fit the conditional mean on TRAIN stars only (no leakage into the test)
     tr = train_dset
-    tr_cat = cat_all[cat_all["split"] == "train"]
+    tr_cat = train_dset.catalog     # same filtered rows as train_dset.y_raw
     lab = {n: i for i, n in enumerate(labels)}
 
     def train_cols(name):
