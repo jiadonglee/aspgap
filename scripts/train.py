@@ -146,15 +146,22 @@ def main() -> None:
     side_cfg = cfg["model"].get("side") or {}
     aug_cfg = (cfg["train"].get("augment") or {}).get("noise_match") or {}
     p_aug = float(aug_cfg.get("p", 0.0))
+    select_on = cfg["train"].get("select_on", "mean" if p_aug > 0 else "clean")
+    if select_on not in ("clean", "degraded", "mean"):
+        raise ValueError(f"train.select_on must be clean|degraded|mean, got {select_on!r}")
+    # the degraded val set (select_on != clean) needs the augmenter even when p == 0;
+    # training batches are only augmented if p > 0 (so a no-aug ablation can be
+    # selected with the same criterion as the augmented model)
+    need_aug = p_aug > 0 or select_on != "clean"
     use_side = bool(side_cfg.get("scalars") or side_cfg.get("noise_channel"))
-    need_noise = use_side or p_aug > 0
+    need_noise = use_side or need_aug
     if use_side and inp != "xp343":
         raise ValueError("side conditioning needs data.input=xp343")
-    if p_aug > 0 and inp not in ("xp343", "coef110n"):
+    if need_aug and inp not in ("xp343", "coef110n"):
         raise ValueError("noise augmentation needs data.input=xp343 or coef110n")
     # coef110n: the augmenter degrades the raw coef110; the network input is
     # rebuilt with the cached AspGap forward transform (aspgap_scaler.npz)
-    aspgap_sc = aspgap_scaler_arrays(root) if (p_aug > 0 and inp == "coef110n") else None
+    aspgap_sc = aspgap_scaler_arrays(root) if (need_aug and inp == "coef110n") else None
     req_valid = bool(cfg["data"].get("require_xp_valid", False))
     aux_names = list(cfg["labels"].get("aux") or [])      # P1: [] => old behaviour
     dsets = {s: APOGEEDataset(root, split=s, input=inp, noise=need_noise,
@@ -207,7 +214,7 @@ def main() -> None:
         sd = np.asarray(dset.side[dset.indices][:, cols], np.float64)
         net.side.set_scalar_stats(np.nanmean(sd, 0), np.nanstd(sd, 0))
     augmenter = None
-    if p_aug > 0:
+    if need_aug:
         augmenter = NoiseMatchAugment.from_root(
             root, device=device, p=p_aug, g_target=aug_cfg.get("g_target", "catalog_hist"),
             g_max=float(aug_cfg.get("g_max", 17.65)))
@@ -215,11 +222,6 @@ def main() -> None:
     use_amp, amp_dtype = amp_settings(cfg, device)
     # eval runs in fp32 unless eval.amp: true (comparable to the *_v1 runs)
     amp = (use_amp and bool(cfg.get("eval", {}).get("amp", False)), amp_dtype)
-    select_on = cfg["train"].get("select_on", "mean" if augmenter is not None else "clean")
-    if select_on not in ("clean", "degraded", "mean"):
-        raise ValueError(f"train.select_on must be clean|degraded|mean, got {select_on!r}")
-    if select_on != "clean" and augmenter is None:
-        raise ValueError("train.select_on != clean needs train.augment.noise_match.p > 0")
     val_deg_loader = None
     if augmenter is not None:
         # fixed-seed degraded val set (G' from the catalog histogram, p=1), built
@@ -258,7 +260,7 @@ def main() -> None:
         t0 = time.time()
         tr_loss, nb, n_nonfinite, n_aug, n_seen = 0.0, 0, 0, 0, 0
         for batch in train_loader:
-            if augmenter is not None:
+            if p_aug > 0:
                 batch = augmenter(batch)
                 n_aug += int(batch["aug"].sum())
                 n_seen += len(batch["aug"])
