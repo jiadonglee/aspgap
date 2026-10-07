@@ -119,7 +119,7 @@ class APOGEEDataset(Dataset):
                  input: str = "xp343", labels: list[str] | None = None,
                  noise: bool = False, require_xp_valid: bool = False,
                  aux: list[str] | None = None, aux_ref: str = "h",
-                 latent: str | None = None):
+                 latent: str | None = None, astro: bool = False):
         if aux_ref not in ("h", "fe"):
             raise ValueError(f"labels.aux_ref must be h|fe, got {aux_ref!r}")
         self.aux_ref = aux_ref
@@ -160,14 +160,24 @@ class APOGEEDataset(Dataset):
         z = np.load(self.root / "labels.npz")
         scaler = LabelScaler.load(root)
         self.labels = scaler.labels if labels is None else list(labels)
-        assert self.labels == scaler.labels, (
-            f"label order mismatch: {self.labels} vs {scaler.labels}"
-        )
+        missing = [n for n in self.labels if n not in scaler.labels]
+        if missing:
+            raise ValueError(f"labels {missing} not in {scaler.labels}")
         col = {name: i for i, name in enumerate(scaler.labels)}
+        if self.labels != scaler.labels:
+            # a subset / reordering of the stored labels: restrict the scaler so that
+            # y, floors, inverse() and metrics all refer to exactly these labels
+            sel = [col[n] for n in self.labels]
+            scaler = LabelScaler(scaler.mean[sel], scaler.std[sel], scaler.floor_norm[sel], self.labels)
+            col = {name: i for i, name in enumerate(self.labels)}
+            zcol = {n: i for i, n in enumerate(LabelScaler.load(root).labels)}
+        else:
+            zcol = col
 
-        y = z["y"][self.indices][:, [col[n] for n in self.labels]]
-        yerr = z["yerr"][self.indices][:, [col[n] for n in self.labels]]
-        mask = z["mask"][self.indices][:, [col[n] for n in self.labels]].astype(bool)
+        zc = [zcol[n] for n in self.labels]
+        y = z["y"][self.indices][:, zc]
+        yerr = z["yerr"][self.indices][:, zc]
+        mask = z["mask"][self.indices][:, zc].astype(bool)
 
         self.y = scaler.transform_y(y).astype(np.float32)
         self.yerr = scaler.transform_err(yerr).astype(np.float32)
@@ -175,8 +185,7 @@ class APOGEEDataset(Dataset):
         self.y_raw = y
         self.yerr_raw = yerr
         self.scaler = scaler
-        self.floor_norm = scaler.floor_norm[[col[n] for n in self.labels]] \
-            .astype(np.float32)
+        self.floor_norm = scaler.floor_norm.astype(np.float32)
 
         # auxiliary labels (P1): separate files, never part of `labels` / metrics
         self.aux_labels: list[str] = list(aux or [])
@@ -189,6 +198,11 @@ class APOGEEDataset(Dataset):
         self.latent = latent
         if latent:
             self._load_latent(cat, latent)
+
+        # Gaia parallax + 2MASS/WISE colours (astrometry_phot.parquet, build_astrometry_phot.py)
+        self.astro = bool(astro)
+        if self.astro:
+            self._load_astro(cat)
 
         # per-label sample weights can be attached later by the trainer
         self.label_weights = np.ones(len(self.labels), dtype=np.float32)
@@ -229,6 +243,48 @@ class APOGEEDataset(Dataset):
         self.y_aux = self.aux_scaler.transform_y(y).astype(np.float32)
         self.yerr_aux = self.aux_scaler.transform_err(yerr).astype(np.float32)
         self.floor_aux = self.aux_scaler.floor_norm.astype(np.float32)
+
+    def _load_astro(self, full_cat: pd.DataFrame) -> None:
+        """Per-star parallax likelihood inputs and observed colours for the distance model.
+        Everything refers to the ORIGINAL star (never touched by the noise augmentation).
+        plx_ok = finite parallax and error > 0 (no S/N or sign cut)."""
+        from ..models.distance import BANDS, COLOURS, PLX_ZP_FALLBACK
+        f = self.root / "astrometry_phot.parquet"
+        if not f.is_file():
+            raise FileNotFoundError(f"{f} missing; run scripts/build_astrometry_phot.py")
+        t = pd.read_parquet(f).sort_values("row").reset_index(drop=True)
+        full_sid = full_cat.sort_values("row")["source_id"].to_numpy().astype(np.int64)
+        if len(t) != len(full_sid) or not np.array_equal(t["source_id"].to_numpy(np.int64), full_sid):
+            raise ValueError(f"{f} is not aligned with catalog row order (source_id mismatch)")
+        t = t.iloc[self.indices].reset_index(drop=True)
+        self.astro_table = t                           # l, b, ra, dec, raw photometry for evaluation
+        g = t["phot_g_mean_mag"].to_numpy(np.float64)       # Gaia G of the original star
+        plx, e = t["parallax"].to_numpy(np.float64), t["parallax_error"].to_numpy(np.float64)
+        zp = t["zpt"].to_numpy(np.float64) if "zpt" in t else np.full(len(t), PLX_ZP_FALLBACK)
+        zp = np.where(np.isfinite(zp), zp, PLX_ZP_FALLBACK)
+        ok = np.isfinite(plx) & np.isfinite(e) & (e > 0) & np.isfinite(g)
+        mag = {"G": g, "BP": t["phot_bp_mean_mag"], "RP": t["phot_rp_mean_mag"], "J": t["j_m"],
+               "H": t["h_m"], "K": t["ks_m"], "W1": t["w1mpro"], "W2": t["w2mpro"]}
+        err = {"G": t["e_g"], "BP": t["e_bp"], "RP": t["e_rp"], "J": t["j_msigcom"],
+               "H": t["h_msigcom"], "K": t["ks_msigcom"], "W1": t["w1mpro_error"], "W2": t["w2mpro_error"]}
+        good = {"G": np.ones(len(t), bool), "BP": np.ones(len(t), bool), "RP": np.ones(len(t), bool),
+                "J": t["tmass_ok_j"], "H": t["tmass_ok_h"], "K": t["tmass_ok_k"],
+                "W1": t["wise_ok_w1"], "W2": t["wise_ok_w2"]}
+        mag = {b: np.asarray(mag[b], np.float64) for b in BANDS}
+        err = {b: np.asarray(err[b], np.float64) for b in BANDS}
+        good = {b: np.asarray(good[b], bool) & np.isfinite(mag[b]) & np.isfinite(err[b]) & (err[b] > 0)
+                for b in BANDS}
+        col = np.stack([mag[a] - mag[b] for a, b in COLOURS], 1)
+        cerr = np.stack([np.hypot(err[a], err[b]) for a, b in COLOURS], 1)
+        cok = np.stack([good[a] & good[b] for a, b in COLOURS], 1)
+        self.astro_arr = {
+            "g": g.astype(np.float32), "plx": np.nan_to_num(plx).astype(np.float32),
+            "plx_err": np.where(ok, e, 1.0).astype(np.float32), "zp": zp.astype(np.float32),
+            "plx_ok": ok, "col": np.nan_to_num(col).astype(np.float32),
+            "col_err": np.where(cok, cerr, 1.0).astype(np.float32), "col_ok": cok,
+            "mag": np.nan_to_num(np.stack([mag[b] for b in BANDS], 1)).astype(np.float32),
+            "mag_ok": np.stack([good[b] for b in BANDS], 1),
+        }
 
     def _load_latent(self, full_cat: pd.DataFrame, source: str) -> None:
         if source != "v1_latent":
@@ -290,6 +346,8 @@ class APOGEEDataset(Dataset):
                      "y_aux": torch.from_numpy(np.nan_to_num(self.y_aux[i])),
                      "yerr_aux": torch.from_numpy(np.nan_to_num(self.yerr_aux[i])),
                      "mask_aux": torch.from_numpy(self.mask_aux[i])}
+        if self.astro:
+            extra = {**extra, "astro": {k: torch.as_tensor(v[i]) for k, v in self.astro_arr.items()}}
         return {
             **extra,
             "x": torch.from_numpy(np.array(xi, dtype=np.float32, copy=True)),

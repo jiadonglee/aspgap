@@ -81,7 +81,7 @@ train:
   early_stop_patience: 12
   logvar_clamp: [-8.0, 8.0]
   sampler:
-    type: binned        # binned | random
+    type: random        # random | binned (binned is pathological: top 1% of stars get ~94% of draws)
     power: 0.5          # p_bin ∝ 1 / N_bin^power
     bins: {teff: 300.0, logg: 0.5, m_h: 0.25}
 

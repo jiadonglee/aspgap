@@ -135,8 +135,8 @@ def coef_to_aspgap_input(coef110: np.ndarray, g: np.ndarray,
     """Forward transform of the old AspGap network input (exact inverse of
     build_dataset.invert_aspgap_coef): divide by 10^((15-G)*0.4), then
     (x - center) / scale per photometer. Works on numpy or torch tensors."""
-    if hasattr(coef110, "device"):                                  # torch
-        import torch
+    import torch
+    if isinstance(coef110, torch.Tensor):                           # torch (numpy>=2 arrays also have .device)
         gn = coef110.double() / 10.0 ** ((15.0 - g.double()) * 0.4)[:, None]
         c = torch.as_tensor(sc["center"], dtype=torch.float64, device=gn.device)
         s = torch.as_tensor(sc["scale"], dtype=torch.float64, device=gn.device)

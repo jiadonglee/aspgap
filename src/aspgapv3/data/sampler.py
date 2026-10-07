@@ -52,7 +52,7 @@ class BinnedWeightedSampler(Sampler[int]):
 
 
 def make_sampler(dataset, cfg_sampler: dict) -> Sampler[int] | None:
-    if cfg_sampler.get("type", "binned") == "random":
+    if cfg_sampler.get("type", "random") == "random":
         return None
     cat = dataset.catalog
     vals = {k: (cat[k].to_numpy(float) if k in cat else np.full(len(cat), np.nan))

@@ -30,6 +30,7 @@ from aspgapv3.amp import amp_settings, autocast_ctx, float_outputs  # noqa: E402
 from aspgapv3.augment import NoiseMatchAugment, apply_aspgap_input  # noqa: E402
 from aspgapv3.data.xp import aspgap_scaler_arrays  # noqa: E402
 from aspgapv3.data.dataset import APOGEEDataset  # noqa: E402
+from aspgapv3.dist_eval import distance_tables, extinction_report, red_clump  # noqa: E402
 from aspgapv3.losses import MaskedHeteroscedasticNLL  # noqa: E402
 from aspgapv3.metrics import (derived_mgfe, fit_conditional_mean,  # noqa: E402
                               metrics_table, residual_recovery_score)
@@ -41,7 +42,7 @@ from aspgapv3.ood import LatentKnnOOD  # noqa: E402
 @torch.no_grad()
 def predict(net, dset: APOGEEDataset, device: str, batch: int = 1024, amp=(False, torch.bfloat16),
             aug: NoiseMatchAugment | None = None, fixed_g: float | None = None,
-            seed: int = 0, aspgap_sc: dict | None = None):
+            seed: int = 0, aspgap_sc: dict | None = None, dist_out: dict | None = None):
     """Returns (mu_raw, sigma_raw, z256, frac_degraded). With `aug`, every
     batch is degraded to fixed_g (see augment.py) using a seeded generator."""
     net.eval()
@@ -49,6 +50,7 @@ def predict(net, dset: APOGEEDataset, device: str, batch: int = 1024, amp=(False
                                          num_workers=2)
     gen = torch.Generator(device=device).manual_seed(seed) if aug is not None else None
     mus, sigs, zs, n_aug = [], [], [], 0
+    dd = {"mg": [], "logvar_mg": [], "a0": []}
     for b in loader:
         if aug is not None:
             b = aug(b, gen=gen, fixed_g=fixed_g)
@@ -66,11 +68,23 @@ def predict(net, dset: APOGEEDataset, device: str, batch: int = 1024, amp=(False
         mus.append(mu)
         sigs.append(lv.exp().sqrt().cpu().numpy())
         zs.append(out["z"].cpu().numpy())
+        if dist_out is not None and "mg" in out:
+            for k in dd:
+                dd[k].append(out[k].cpu().numpy())
+    if dist_out is not None and dd["mg"]:
+        dist_out.update({k: np.concatenate(v) for k, v in dd.items()})
     mu = np.concatenate(mus)
     sig = np.concatenate(sigs)
     z = np.concatenate(zs)
     mu_r, sig_r = dset.scaler.inverse(mu, sig)
     return mu_r, sig_r, z, n_aug / max(len(dset), 1)
+
+
+def _md(df: pd.DataFrame) -> str:
+    try:
+        return df.to_markdown(index=False, floatfmt=".4f")
+    except ImportError:
+        return df.to_string(index=False, float_format="%.4f")
 
 
 def domain_slices(cat: pd.DataFrame) -> dict[str, np.ndarray]:
@@ -89,6 +103,8 @@ def main() -> None:
     ap.add_argument("--which", default="best", choices=["best", "last"])
     ap.add_argument("--degrade-g", nargs="*", type=float, default=[15.0, 16.0, 17.0, 17.5])
     ap.add_argument("--degrade-seed", type=int, default=1234)
+    ap.add_argument("--ref", default="aspgap110_aug_rand_r2",
+                    help="reference run (dir name beside --run, or a path) for the label-metric deltas; '' = off")
     args = ap.parse_args()
 
     run = Path(args.run)
@@ -99,6 +115,7 @@ def main() -> None:
     labels = ckpt["labels"]
     n_atm = ckpt["n_atm"]
 
+    use_dist = bool((cfg["model"].get("distance") or {}).get("enabled", False))
     net = build_model(cfg, n_atm=n_atm, n_chem=len(labels) - n_atm,
                       n_aux=int(ckpt.get("n_aux", 0))).to(device)
     net.load_state_dict(ckpt["state_dict"])
@@ -114,7 +131,7 @@ def main() -> None:
     degrade = bool(args.degrade_g) and inp in ("xp343", "coef110n") and have_noise
     aspgap_sc = aspgap_scaler_arrays(root) if (degrade and inp == "coef110n") else None
     need_noise = degrade or bool(side_cfg.get("scalars") or side_cfg.get("noise_channel"))
-    kw = dict(input=inp, labels=labels, noise=need_noise,
+    kw = dict(input=inp, labels=labels, noise=need_noise, astro=use_dist,
               require_xp_valid=bool(cfg["data"].get("require_xp_valid", False)))
     aug = NoiseMatchAugment.from_root(root, device=device, p=1.0,
                                       g_max=float(((cfg["train"].get("augment") or {})
@@ -134,7 +151,8 @@ def main() -> None:
     for split in args.splits:
         dset = APOGEEDataset(root, split, **kw)
         cat = dset.catalog      # already filtered (require_xp_valid) like the predictions
-        mu, sig, z, _ = predict(net, dset, device, amp=amp)
+        dout: dict = {}
+        mu, sig, z, _ = predict(net, dset, device, amp=amp, dist_out=dout)
         y, m = dset.y_raw, dset.mask
 
         table = metrics_table(mu, sig, y, m, labels)
@@ -159,6 +177,19 @@ def main() -> None:
                 rows.append(r)
         pd.DataFrame(rows).to_csv(run / f"metrics_{split}_domains.csv", index=False)
 
+        if use_dist:
+            dtab, _ = distance_tables(dout["mg"], dout["logvar_mg"], dout["a0"], dset.astro_arr)
+            dtab.to_csv(run / f"metrics_distance_{split}.csv", index=False)
+            summary.append(f"\n## {split} — distance: parallax pull / M_G residual (parallax S/N>10) / "
+                           "fractional distance precision, by G (first row = all)\n")
+            summary.append(_md(dtab))
+            rc = red_clump(y, m, labels, dset.astro_arr, dout["mg"], dout["a0"],
+                           dset.astro_arr["mag_ok"][:, 5])
+            ext = extinction_report(dout["a0"], dset.astro_table, y[:, labels.index("teff")], mu[:, labels.index("teff")])
+            summary.append(f"\n**{split} red clump** (2.3<logg<2.6, 4500<Teff<5100, [M/H]>-0.6): {rc}\n")
+            summary.append(f"\n**{split} extinction**: {ext}\n")
+            np.savez(run / f"predictions_dist_{split}.npz", source_id=cat["source_id"].to_numpy(), **dout)
+
         # OOD score for every star in this split
         np.savez(run / f"predictions_{split}.npz",
                  source_id=cat["source_id"].to_numpy(),
@@ -172,17 +203,30 @@ def main() -> None:
     if degrade:
         for split in args.splits:
             dset = APOGEEDataset(root, split, **kw)
-            rows = []
+            rows, drows = [], []
             for gp in [None] + list(args.degrade_g):
-                mu, sig, _, frac = predict(net, dset, device, amp=amp, aug=aug,
+                dout = {}
+                mu, sig, _, frac = predict(net, dset, device, amp=amp, aug=aug, dist_out=dout,
                                            fixed_g=gp, seed=args.degrade_seed, aspgap_sc=aspgap_sc) \
-                    if gp is not None else (*predict(net, dset, device, amp=amp)[:3], 0.0)
+                    if gp is not None else (*predict(net, dset, device, amp=amp, dist_out=dout)[:3], 0.0)
+                if use_dist:
+                    dt, _ = distance_tables(dout["mg"], dout["logvar_mg"], dout["a0"], dset.astro_arr)
+                    dt = dt.iloc[[0]].copy()          # all-G row
+                    dt.insert(0, "g_prime", np.nan if gp is None else gp)
+                    drows.append(dt)
                 t = metrics_table(mu, sig, dset.y_raw, dset.mask, labels)
                 t.insert(0, "g_prime", np.nan if gp is None else gp)
                 t.insert(1, "frac_degraded", frac)
                 rows.append(t)
             deg = pd.concat(rows, ignore_index=True)
             deg.to_csv(run / f"metrics_degraded_{split}.csv", index=False)
+            if use_dist:
+                dd_ = pd.concat(drows, ignore_index=True)
+                dd_.to_csv(run / f"metrics_distance_degraded_{split}.csv", index=False)
+                summary.append(f"\n## {split} — M_G / parallax pull vs degraded G' (M_G residual: parallax S/N>10 "
+                               "stars, original-star G and parallax; all-G row)\n")
+                summary.append(_md(dd_[["g_prime", "n", "pull_median", "pull_rstd", "n_hi_snr", "MG_resid_rmse",
+                                        "MG_resid_mad", "MG_resid_median", "frac_dist_pred_median"]]))
             summary.append(f"\n## {split} — degraded to fixed G' (seed {args.degrade_seed}; "
                            "g_prime NaN = native)\n")
             cols = ["g_prime", "frac_degraded", "label", "n", "rmse", "bias",
@@ -191,6 +235,27 @@ def main() -> None:
                 summary.append(deg[cols].to_markdown(index=False, floatfmt=".4f"))
             except ImportError:
                 summary.append(deg[cols].to_string(index=False, float_format="%.4f"))
+
+    if args.ref:
+        refd = run.parent / args.ref if not Path(args.ref).is_dir() else Path(args.ref)
+        summary.append(f"\n## Label metrics vs reference run {refd.name} (negative delta = better)\n")
+        for split in args.splits:
+            f0 = refd / f"metrics_{split}.csv"
+            f1 = run / f"metrics_{split}.csv"
+            if f0.is_file() and f1.is_file():
+                a, b = pd.read_csv(f1).set_index("label"), pd.read_csv(f0).set_index("label")
+                cmp = pd.DataFrame({"rmse": a["rmse"], "rmse_ref": b["rmse"].reindex(a.index)})
+                cmp["delta"] = cmp["rmse"] - cmp["rmse_ref"]
+                cmp["delta_pct"] = 100 * cmp["delta"] / cmp["rmse_ref"]
+                summary.append(f"\n**{split}**\n")
+                summary.append(_md(cmp.reset_index()))
+            g0, g1 = refd / f"metrics_degraded_{split}.csv", run / f"metrics_degraded_{split}.csv"
+            if g0.is_file() and g1.is_file():
+                a = pd.read_csv(g1).merge(pd.read_csv(g0), on=["g_prime", "label"], suffixes=("", "_ref"))
+                a = a.dropna(subset=["rmse_ref"])
+                a["delta_pct"] = 100 * (a["rmse"] - a["rmse_ref"]) / a["rmse_ref"]
+                summary.append(f"\n**{split} degraded**\n")
+                summary.append(_md(a[["g_prime", "label", "rmse", "rmse_ref", "delta_pct"]]))
 
     # ---- conditional chemical-information experiment (pooled test sets) ----
     summary.append("\n## Conditional chemical information (beyond "

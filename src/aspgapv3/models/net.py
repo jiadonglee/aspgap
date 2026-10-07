@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 
 from .encoders import build_encoder
+from .distance import DistanceHead, IntrinsicColourNet
 from .heads import Trunk, HeteroscedasticHead
 from .side import SideFiLM
 
@@ -36,7 +37,8 @@ class XPChemNet(nn.Module):
                  side: dict | None = None, n_aux: int = 0,
                  chem_condition: str = "none", cond_logvar: bool = False,
                  aux_condition: bool = True, input_norm_dim: int = 0,
-                 latent_dim: int = 0, latent_hidden: int = 512):
+                 latent_dim: int = 0, latent_hidden: int = 512,
+                 distance: dict | None = None):
         super().__init__()
         if chem_condition not in CHEM_CONDITIONS:
             raise ValueError(f"model.heads.chem_condition must be one of "
@@ -71,6 +73,13 @@ class XPChemNet(nn.Module):
                 nn.Linear(int(latent_hidden), self.latent_dim))
         else:
             self.head_lat = None
+        # optional M_G / A0 head + intrinsic-colour net (models/distance.py). The colour net
+        # takes only the n_atm+n_chem label values, never the spectrum. None => absent.
+        dist = distance or {}
+        self.has_distance = bool(dist.get("enabled", False))
+        if self.has_distance:
+            self.head_dist = DistanceHead(trunk_dim)
+            self.colour_net = IntrinsicColourNet(n_atm + n_chem, int(dist.get("colour_hidden", 128)))
         side = side or {}
         self.side = SideFiLM(trunk_dim, list(side.get("scalars", [])),
                              bool(side.get("noise_channel", False))) \
@@ -106,6 +115,8 @@ class XPChemNet(nn.Module):
             out["mu_aux"], out["logvar_aux"] = self.head_aux(h_chem if self.aux_condition else z)
         if self.head_lat is not None:
             out["lat"] = self.head_lat(z)
+        if self.has_distance:
+            out["mg"], out["logvar_mg"], out["a0"] = self.head_dist(z)
         return out
 
     # -- parameter groups: encoder LR << head LR for Stage B/C --------------
@@ -158,4 +169,5 @@ def build_model(cfg: dict, n_atm: int, n_chem: int, n_aux: int = 0) -> XPChemNet
                      aux_condition=bool(heads.get("aux_condition", True)),
                      input_norm_dim=in_norm_dim,
                      latent_dim=int(lh.get("dim", 0)) if lh.get("source") else 0,
-                     latent_hidden=int(lh.get("hidden", 512)))
+                     latent_hidden=int(lh.get("hidden", 512)),
+                     distance=cfg["model"].get("distance"))

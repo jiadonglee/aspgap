@@ -37,6 +37,7 @@ from aspgapv3.data.sampler import make_sampler  # noqa: E402
 from aspgapv3.data.xp import aspgap_scaler_arrays  # noqa: E402
 from aspgapv3.losses import MaskedHeteroscedasticNLL, combine_losses, masked_latent_mse  # noqa: E402
 from aspgapv3.metrics import metrics_table  # noqa: E402
+from aspgapv3.models.distance import distance_losses  # noqa: E402
 from aspgapv3.models.net import build_model  # noqa: E402
 from aspgapv3.models.side import build_side  # noqa: E402
 
@@ -54,14 +55,18 @@ def lr_at(epoch: int, cfg: dict) -> float:
 @torch.no_grad()
 def evaluate(net, loader, device, loss_atm, loss_chem,
              amp: tuple[bool, torch.dtype] = (False, torch.bfloat16),
-             loss_aux=None, extra: dict | None = None) -> tuple[float, float, dict]:
+             loss_aux=None, extra: dict | None = None, dist: dict | None = None) -> tuple[float, float, dict]:
     """Returns (total NLL = atm + chem, chem NLL, per-label raw-unit metrics df).
     Same precision policy as training: forward under autocast, losses in fp32.
     The auxiliary-head NLL (if `loss_aux` and the model has an aux head) is NOT
     part of the returned total (checkpoint selection stays chem/atm-only); it is
-    written to extra["aux_nll"]."""
+    written to extra["aux_nll"].
+    With `dist` ({"w_plx", "w_phot"}; net has the distance head) the returned total also contains
+    w_plx * parallax NLL + w_phot * colour NLL (so checkpoint selection scores the distance model
+    too); the unweighted terms go to extra["plx_nll"] / extra["phot_nll"]."""
     net.eval()
     tot, tot_c, tot_x, tot_l, n = 0.0, 0.0, 0.0, 0.0, 0
+    tot_p, tot_ph = 0.0, 0.0
     mus, sigmas, ys, ms = [], [], [], []
     for batch in loader:
         x = batch["x"].to(device, non_blocking=True)
@@ -83,6 +88,10 @@ def evaluate(net, loader, device, loss_atm, loss_chem,
         if "lat" in out and "lat" in batch:      # latent distillation head (monitoring only)
             tot_l += float(masked_latent_mse(out["lat"], batch["lat"].to(device),
                                              batch["lat_ok"].to(device))) * bs
+        if dist is not None:
+            dl = distance_losses(net, out, batch, device)
+            tot_p += float(dl["plx"]) * bs
+            tot_ph += float(dl["phot"]) * bs
         tot += float(l_all) * bs
         tot_c += float(l_chem) * bs
         n += bs
@@ -105,6 +114,9 @@ def evaluate(net, loader, device, loss_atm, loss_chem,
     if extra is not None:
         extra["aux_nll"] = tot_x / max(n, 1)
         extra["lat_mse"] = tot_l / max(n, 1)
+        extra["plx_nll"], extra["phot_nll"] = tot_p / max(n, 1), tot_ph / max(n, 1)
+    if dist is not None:
+        tot += dist["w_plx"] * tot_p + dist["w_phot"] * tot_ph
     return tot / max(n, 1), tot_c / max(n, 1), table
 
 
@@ -171,7 +183,13 @@ def main() -> None:
     lat_cfg = cfg["model"].get("latent_head") or {}       # latent distillation: absent => off
     lat_src = lat_cfg.get("source") or None
     w_lat = float(lat_cfg.get("weight", 0.0)) if lat_src else 0.0
-    dsets = {s: APOGEEDataset(root, split=s, input=inp, noise=need_noise,
+    dist_cfg = cfg["model"].get("distance") or {}          # M_G / A0 + photometric forward model
+    use_dist = bool(dist_cfg.get("enabled", False))
+    w_plx, w_phot = (float(dist_cfg.get("weight_plx", 1.0)), float(dist_cfg.get("weight_phot", 1.0))) \
+        if use_dist else (0.0, 0.0)
+    dist_w = {"w_plx": w_plx, "w_phot": w_phot} if use_dist else None
+    label_names = list(cfg["labels"]["atm"]) + list(cfg["labels"].get("chem") or [])
+    dsets = {s: APOGEEDataset(root, split=s, input=inp, noise=need_noise, labels=label_names, astro=use_dist,
                               require_xp_valid=req_valid, aux=aux_names,
                               aux_ref=str(cfg["labels"].get("aux_ref", "h")),
                               latent=lat_src) for s in
@@ -182,7 +200,7 @@ def main() -> None:
          "iid_test": len(dsets["iid_test"]), "sky_test": len(dsets["sky_test"]),
          "input": inp, "require_xp_valid": req_valid,
          "n_dropped_invalid": {s: d.n_dropped_invalid for s, d in dsets.items()},
-         "n_labels": n_labels, "labels": dsets["train"].labels, "aux": aux_names,
+         "distance": use_dist, "n_labels": n_labels, "labels": dsets["train"].labels, "aux": aux_names,
          **({"latent_head": {**lat_cfg, "dim_data": dsets["train"].latent_dim}} if lat_src else {})})
     if lat_src and int(lat_cfg.get("dim", 0)) != dsets["train"].latent_dim:
         raise ValueError(f"model.latent_head.dim={lat_cfg.get('dim')} != latent file dim "
@@ -235,6 +253,20 @@ def main() -> None:
         cols = net.side.cols
         sd = np.asarray(dset.side[dset.indices][:, cols], np.float64)
         net.side.set_scalar_stats(np.nanmean(sd, 0), np.nanstd(sd, 0))
+    if use_dist:
+        # data-driven init: M_G head centred on the parallax-based M_G of well-measured stars,
+        # colour net output bias at the mean observed colours (losses start O(1), not O(10^2))
+        from aspgapv3.models.distance import EXT_K
+        ar = dset.astro_arr
+        zc = ar["plx_ok"] & (ar["plx"] - ar["zp"] > 10 * ar["plx_err"])
+        mg_obs = ar["g"][zc] + 5 * np.log10(ar["plx"][zc] - ar["zp"][zc]) - 10.0
+        net.head_dist.set_mg_stats(float(np.median(mg_obs)), float(mg_obs.std()))
+        cw = ar["col_ok"].astype(np.float64)
+        net.colour_net.set_output_bias((ar["col"] * cw).sum(0) / np.maximum(cw.sum(0), 1))
+        log({"event": "distance_init", "mg_mean": float(np.median(mg_obs)), "mg_std": float(mg_obs.std()),
+             "n_mg": int(zc.sum()), "plx_ok": float(ar["plx_ok"].mean()),
+             "col_ok_frac": [round(float(v), 3) for v in ar["col_ok"].mean(0)],
+             "weight_plx": w_plx, "weight_phot": w_phot})
     augmenter = None
     if need_aug:
         augmenter = NoiseMatchAugment.from_root(
@@ -286,6 +318,23 @@ def main() -> None:
              "label_total": acc[0] + acc[1], "weight_lat": w_lat,
              "weighted_lat": w_lat * acc[2]})
 
+    if use_dist:
+        net.eval()
+        acc = np.zeros(4)
+        with torch.no_grad():
+            for i, b in enumerate(eval_loader("val")):
+                if i >= 4:
+                    break
+                o = float_outputs(net(b["x"].to(device), build_side(net, b)))
+                yb, eb, mb = (b[k].to(device) for k in ("y", "yerr", "mask"))
+                dl = distance_losses(net, o, b, device)
+                acc += [float(loss_atm(o["mu_atm"], o["logvar_atm"], yb[:, :n_atm], eb[:, :n_atm], mb[:, :n_atm]))
+                        + float(loss_chem(o["mu_chem"], o["logvar_chem"], yb[:, n_atm:], eb[:, n_atm:], mb[:, n_atm:])),
+                        float(dl["plx"]), float(dl["phot"]), float(dl["pull"].abs().median())]
+        acc /= 4
+        log({"event": "init_losses", "label_nll": acc[0], "plx_nll": acc[1], "phot_nll": acc[2],
+             "plx_median_abs_pull": acc[3], "weighted_plx": w_plx * acc[1], "weighted_phot": w_phot * acc[2]})
+
     # ---- loop --------------------------------------------------------------
     scaler_amp = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
     clip = float(cfg["train"].get("grad_clip", 1.0))
@@ -301,6 +350,7 @@ def main() -> None:
         t0 = time.time()
         tr_loss, nb, n_nonfinite, n_aug, n_seen = 0.0, 0, 0, 0, 0
         tr_lab, tr_lat = 0.0, 0.0
+        tr_plx, tr_phot = 0.0, 0.0
         for batch in train_loader:
             if p_aug > 0:
                 batch = augmenter(batch)
@@ -332,6 +382,9 @@ def main() -> None:
                 if lat_src else None             # target = latent of the CLEAN input (never augmented)
             loss = combine_losses(l_atm, l_chem, l_x, loss_mode, w_atm_glob, w_aux,
                                   l_lat=l_lat, weight_lat=w_lat)
+            if use_dist:          # astro columns are the ORIGINAL star's (augmentation never touches them)
+                dl = distance_losses(net, out, batch, device)
+                loss = loss + w_plx * dl["plx"] + w_phot * dl["phot"]
             if not torch.isfinite(loss):
                 n_nonfinite += 1
                 continue
@@ -346,22 +399,30 @@ def main() -> None:
             scaler_amp.step(opt)
             scaler_amp.update()
             tr_loss += float(loss)
+            if use_dist:
+                tr_plx += float(dl["plx"])
+                tr_phot += float(dl["phot"])
             if lat_src:
                 tr_lat += float(l_lat)
                 tr_lab += float(loss) - w_lat * float(l_lat)
             nb += 1
         ex = {}
         val, val_chem, table = evaluate(net, eval_loader("val"), device, loss_atm, loss_chem, amp,
-                                        loss_aux=loss_aux, extra=ex)
+                                        loss_aux=loss_aux, extra=ex, dist=dist_w)
         sel = val
         extra = {"val_aux_nll": ex["aux_nll"]} if aux_names else {}
+        if use_dist:
+            extra = {**extra, "train_plx_nll": tr_plx / max(nb, 1), "train_phot_nll": tr_phot / max(nb, 1),
+                     "val_plx_nll": ex["plx_nll"], "val_phot_nll": ex["phot_nll"]}
         if lat_src:
             extra = {**extra, "train_label_loss": tr_lab / max(nb, 1), "train_lat_mse": tr_lat / max(nb, 1),
                      "train_lat_weighted": w_lat * tr_lat / max(nb, 1), "val_lat_mse": ex["lat_mse"]}
         if val_deg_loader is not None:
             ex_d = {}
-            val_d, _, table_d = evaluate(net, val_deg_loader, device, loss_atm, loss_chem, amp, extra=ex_d)
+            val_d, _, table_d = evaluate(net, val_deg_loader, device, loss_atm, loss_chem, amp, extra=ex_d,
+                                         dist=dist_w)
             extra = {**extra, "val_loss_degraded": val_d,
+                     **({"val_plx_nll_degraded": ex_d["plx_nll"]} if use_dist else {}),
                      **({"val_lat_mse_degraded": ex_d["lat_mse"]} if lat_src else {}),
                      "val_rmse_degraded": {r0["label"]: round(r0["rmse"], 5)
                                            for _, r0 in table_d.iterrows() if r0.get("n", 0) > 0}}
@@ -403,7 +464,7 @@ def main() -> None:
                       weights_only=False)
     net.load_state_dict(ckpt["state_dict"])
     for s in ("iid_test", "sky_test"):
-        _, _, table = evaluate(net, eval_loader(s), device, loss_atm, loss_chem, amp)
+        _, _, table = evaluate(net, eval_loader(s), device, loss_atm, loss_chem, amp, dist=dist_w)
         table.to_csv(run_dir / f"metrics_{s}.csv", index=False)
         log({"event": "final", "split": s,
              "rmse": {r["label"]: round(r["rmse"], 5)
