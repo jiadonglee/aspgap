@@ -116,6 +116,20 @@ def parallax_zero_point(t: pd.DataFrame, fallback: float = -0.017):
     return out, ok.astype(np.int8)
 
 
+def sfd_ebv(t: pd.DataFrame, map_dir: str = "data/dustmaps/sfd") -> np.ndarray:
+    """SFD98 E(B-V) at (ra, dec) (not recalibrated; x0.86 is applied by the users).  Needs the
+    SFD_dust_4096_{ngp,sgp}.fits files in `map_dir` and the `dustmaps` package; NaN otherwise."""
+    try:
+        from astropy import units as u
+        from astropy.coordinates import SkyCoord
+        from dustmaps.sfd import SFDQuery
+        q = SFDQuery(map_dir=map_dir)
+        return np.asarray(q(SkyCoord(t["ra"].to_numpy(float) * u.deg, t["dec"].to_numpy(float) * u.deg)), float)
+    except Exception as exc:
+        print("SFD unavailable:", repr(exc))
+        return np.full(len(t), np.nan)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="data/processed/aspcap_v0.6.0")
@@ -140,6 +154,7 @@ def main() -> None:
     t = derive(t)
     t["zpt"], t["zpt_method"] = parallax_zero_point(t)
     out = cat.merge(t, on="source_id", how="left", validate="m:1").sort_values("row").reset_index(drop=True)
+    out["ebv_sfd"] = sfd_ebv(out)
     out.to_parquet(root / "astrometry_phot.parquet", index=False)
     n = len(out)
     print(f"rows {n}; parallax {out.parallax.notna().sum()}; "

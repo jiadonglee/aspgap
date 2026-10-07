@@ -277,7 +277,14 @@ class APOGEEDataset(Dataset):
         col = np.stack([mag[a] - mag[b] for a, b in COLOURS], 1)
         cerr = np.stack([np.hypot(err[a], err[b]) for a, b in COLOURS], 1)
         cok = np.stack([good[a] & good[b] for a, b in COLOURS], 1)
+        # A0 anchors, TRAIN split only (test stars are never anchors -> fair evaluation)
+        from ..models.distance import anchor_targets
+        ebv = t["ebv_sfd"].to_numpy(float) if "ebv_sfd" in t else np.full(len(t), np.nan)
+        tgt, asig, aset = anchor_targets(plx - zp, e, t["b"].to_numpy(float), ebv)
+        aset = np.where(ok & (self.split == "train"), aset, 0).astype(np.int8)
+        self.anchor_set = aset
         self.astro_arr = {
+            "anc_t": tgt.astype(np.float32), "anc_s": asig.astype(np.float32), "anc_ok": aset > 0,
             "g": g.astype(np.float32), "plx": np.nan_to_num(plx).astype(np.float32),
             "plx_err": np.where(ok, e, 1.0).astype(np.float32), "zp": zp.astype(np.float32),
             "plx_ok": ok, "col": np.nan_to_num(col).astype(np.float32),

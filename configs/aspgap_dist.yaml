@@ -24,3 +24,4 @@ model:
     colour_hidden: 128
     weight_plx: 0.1          # init NLLs: label 0.93, plx 233, phot 202 (w=1) -> weighted ~23/20 at init, O(0.1) once trained
     weight_phot: 0.1
+    weight_anchor: 1.0       # A0 anchors (train only): nearby A0=0, high-latitude A0=SFD; see models/distance.py

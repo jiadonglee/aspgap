@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -148,4 +149,33 @@ def distance_losses(net, out: dict, batch: dict, device, clamp=(-8.0, 8.0)) -> d
     col_int = net.colour_net(cin)
     l_phot = colour_nll(a["col"].to(device), a["col_err"].to(device), a["col_ok"].to(device),
                         col_int, out["a0"], net.colour_net.log_sigma_int)
-    return {"plx": l_plx, "phot": l_phot, "pull": pull}
+    l_anc = anchor_nll(out["a0"], a["anc_t"].to(device), a["anc_s"].to(device), a["anc_ok"].to(device)) \
+        if "anc_ok" in a else torch.zeros((), device=device)
+    return {"plx": l_plx, "phot": l_phot, "pull": pull, "anchor": l_anc}
+
+
+# ---------------------------------------------------------------- A0 anchor
+# The intrinsic-colour net f(labels) and A0 are degenerate for any label-dependent colour trend
+# (f absorbs -dK*g(labels), A0 absorbs +g).  Absolute anchors on A0 break this.
+
+def anchor_targets(plx_corr, plx_err, b_deg, ebv_sfd, g=None, near_plx=10.0, near_snr=10.0, near_sigma=0.03,
+                   hb_b=30.0, hb_z=300.0, hb_snr=5.0, hb_sigma0=0.03, hb_sigma_frac=0.1):
+    """Per-star A0 anchors (numpy).  Returns (target, sigma, set) with set 0 = none, 1 = nearby
+    (plx_corr > 10 mas and S/N > 10, d < 100 pc inside the Local Bubble: A0 = 0 +- 0.03),
+    2 = high latitude (|b| > 30 deg and d*sin|b| > 300 pc, d = 1/plx_corr with plx S/N > 5: above most of
+    the dust, A0 = 3.1 * 0.86 * E(B-V)_SFD +- (0.03 + 0.1 * target))."""
+    plx_corr, plx_err, b_deg, ebv = (np.asarray(v, float) for v in (plx_corr, plx_err, b_deg, ebv_sfd))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        snr = plx_corr / plx_err
+        near = (plx_corr > near_plx) & (snr > near_snr)
+        z = (1000.0 / plx_corr) * np.sin(np.radians(np.abs(b_deg)))
+        hb = (np.abs(b_deg) > hb_b) & (plx_corr > 0) & (snr > hb_snr) & (z > hb_z) & np.isfinite(ebv) & ~near
+    tgt = np.where(near, 0.0, np.where(hb, 3.1 * 0.86 * np.nan_to_num(ebv), 0.0))
+    sig = np.where(near, near_sigma, np.where(hb, hb_sigma0 + hb_sigma_frac * tgt, 1.0))
+    return tgt, sig, np.where(near, 1, np.where(hb, 2, 0)).astype(np.int8)
+
+
+def anchor_nll(a0, target, sigma, ok):
+    """Mean 0.5 ((A0 - target)/sigma)^2 over anchor stars of the batch (0 if none)."""
+    w = ok.to(a0.dtype)
+    return (0.5 * ((a0 - target) / sigma) ** 2 * w).sum() / w.sum().clamp_min(1.0)

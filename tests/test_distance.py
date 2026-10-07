@@ -210,3 +210,35 @@ def test_dist_eval_pull_and_resid_self_consistent():
     y = np.tile([4800.0, 2.45, 0.0, 0.0], (n, 1))
     rc = red_clump(y, np.ones((n, 4), bool), ["teff", "logg", "m_h", "alpha_m"], ar, mg, a0, np.ones(n, bool))
     assert rc["n"] == n and rc["MK_median"] == pytest.approx(-1.6, abs=1e-6) and rc["MK_std"] < 1e-5
+
+
+def test_anchor_masks_targets_and_loss():
+    from aspgapv3.models.distance import anchor_nll, anchor_targets
+    #            near      near-lowSNR  highlat-far  highlat-near-plane  low-b far  neg plx   no SFD
+    plx = np.array([20.0,   20.0,        1.0,         1.0,                1.0,       -1.0,     1.0])
+    err = np.array([0.5,    5.0,         0.1,         0.1,                0.1,       0.1,      0.1])
+    b = np.array([10.0,     10.0,        60.0,        10.0,               10.0,      60.0,     60.0])
+    ebv = np.array([0.1,    0.1,         0.05,        0.05,               0.2,       0.05,     np.nan])
+    # d*sin|b| : 1000*sin60 = 866 pc > 300 (row 2); 1000*sin10 = 174 pc < 300 (row 3)
+    t, s, k = anchor_targets(plx, err, b, ebv)
+    assert k.tolist() == [1, 0, 2, 0, 0, 0, 0]
+    assert t[0] == 0 and s[0] == pytest.approx(0.03)
+    assert t[2] == pytest.approx(3.1 * 0.86 * 0.05) and s[2] == pytest.approx(0.03 + 0.1 * t[2])
+    a0 = torch.tensor([0.3, 5.0, 0.0])
+    tg, sg = torch.tensor([0.0, 9.0, 0.2]), torch.tensor([0.03, 1.0, 0.04])
+    ok = torch.tensor([True, False, True])
+    expect = 0.5 * ((0.3 / 0.03) ** 2 + (0.2 / 0.04) ** 2) / 2
+    assert float(anchor_nll(a0, tg, sg, ok)) == pytest.approx(expect)
+    assert float(anchor_nll(a0, tg, sg, torch.zeros(3, dtype=torch.bool))) == 0.0
+
+
+def test_dataset_anchors_train_only(tmp_path):
+    _toy_root(tmp_path, with_aux=False)
+    t = _toy_astro(tmp_path)
+    t["parallax"] = 20.0
+    t["parallax_error"] = 0.1
+    t.to_parquet(tmp_path / "astrometry_phot.parquet")
+    tr = APOGEEDataset(tmp_path, "train", astro=True)
+    va = APOGEEDataset(tmp_path, "val", astro=True)
+    assert (tr.anchor_set == 1).sum() > 30 and (va.anchor_set == 0).all()
+    assert bool(tr[0]["astro"]["anc_ok"]) and not bool(va[0]["astro"]["anc_ok"])

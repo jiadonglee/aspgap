@@ -187,6 +187,7 @@ def main() -> None:
     use_dist = bool(dist_cfg.get("enabled", False))
     w_plx, w_phot = (float(dist_cfg.get("weight_plx", 1.0)), float(dist_cfg.get("weight_phot", 1.0))) \
         if use_dist else (0.0, 0.0)
+    w_anc = float(dist_cfg.get("weight_anchor", 0.0)) if use_dist else 0.0
     dist_w = {"w_plx": w_plx, "w_phot": w_phot} if use_dist else None
     label_names = list(cfg["labels"]["atm"]) + list(cfg["labels"].get("chem") or [])
     dsets = {s: APOGEEDataset(root, split=s, input=inp, noise=need_noise, labels=label_names, astro=use_dist,
@@ -264,7 +265,8 @@ def main() -> None:
         cw = ar["col_ok"].astype(np.float64)
         net.colour_net.set_output_bias((ar["col"] * cw).sum(0) / np.maximum(cw.sum(0), 1))
         log({"event": "distance_init", "mg_mean": float(np.median(mg_obs)), "mg_std": float(mg_obs.std()),
-             "n_mg": int(zc.sum()), "plx_ok": float(ar["plx_ok"].mean()),
+             "n_mg": int(zc.sum()), "n_anchor_nearby": int((dset.anchor_set == 1).sum()),
+             "n_anchor_highlat": int((dset.anchor_set == 2).sum()), "weight_anchor": w_anc, "plx_ok": float(ar["plx_ok"].mean()),
              "col_ok_frac": [round(float(v), 3) for v in ar["col_ok"].mean(0)],
              "weight_plx": w_plx, "weight_phot": w_phot})
     augmenter = None
@@ -320,9 +322,9 @@ def main() -> None:
 
     if use_dist:
         net.eval()
-        acc = np.zeros(4)
+        acc = np.zeros(5)
         with torch.no_grad():
-            for i, b in enumerate(eval_loader("val")):
+            for i, b in enumerate(eval_loader("train")):
                 if i >= 4:
                     break
                 o = float_outputs(net(b["x"].to(device), build_side(net, b)))
@@ -330,10 +332,10 @@ def main() -> None:
                 dl = distance_losses(net, o, b, device)
                 acc += [float(loss_atm(o["mu_atm"], o["logvar_atm"], yb[:, :n_atm], eb[:, :n_atm], mb[:, :n_atm]))
                         + float(loss_chem(o["mu_chem"], o["logvar_chem"], yb[:, n_atm:], eb[:, n_atm:], mb[:, n_atm:])),
-                        float(dl["plx"]), float(dl["phot"]), float(dl["pull"].abs().median())]
+                        float(dl["plx"]), float(dl["phot"]), float(dl["pull"].abs().median()), float(dl["anchor"])]
         acc /= 4
         log({"event": "init_losses", "label_nll": acc[0], "plx_nll": acc[1], "phot_nll": acc[2],
-             "plx_median_abs_pull": acc[3], "weighted_plx": w_plx * acc[1], "weighted_phot": w_phot * acc[2]})
+             "plx_median_abs_pull": acc[3], "anchor_nll": acc[4], "weighted_plx": w_plx * acc[1], "weighted_phot": w_phot * acc[2]})
 
     # ---- loop --------------------------------------------------------------
     scaler_amp = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
@@ -384,7 +386,7 @@ def main() -> None:
                                   l_lat=l_lat, weight_lat=w_lat)
             if use_dist:          # astro columns are the ORIGINAL star's (augmentation never touches them)
                 dl = distance_losses(net, out, batch, device)
-                loss = loss + w_plx * dl["plx"] + w_phot * dl["phot"]
+                loss = loss + w_plx * dl["plx"] + w_phot * dl["phot"] + w_anc * dl["anchor"]
             if not torch.isfinite(loss):
                 n_nonfinite += 1
                 continue

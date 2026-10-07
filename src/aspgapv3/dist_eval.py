@@ -96,9 +96,12 @@ def _spearman(a, b) -> float:
     return float(np.corrcoef(ra, rb)[0, 1])
 
 
-def extinction_report(a0, tab: pd.DataFrame, teff_label, teff_pred) -> dict:
+def extinction_report(a0, tab: pd.DataFrame, teff_label, teff_pred, nearby=None) -> dict:
     """A0 vs SFD (x0.86, R_V=3.1) at |b|>30, plus the A0-Teff degeneracy checks."""
     out = {"a0_min": float(np.min(a0)), "a0_median": float(np.median(a0)), "frac_a0_lt0": float(np.mean(a0 < 0))}
+    if nearby is not None and nearby.any():
+        out.update({"n_nearby": int(nearby.sum()), "a0_nearby_median": med(a0[nearby]),
+                    "a0_nearby_p90": float(np.percentile(a0[nearby], 90))})
     try:
         e = _sfd_ebv(tab["ra"].to_numpy(float), tab["dec"].to_numpy(float))
     except Exception as exc:                     # dustmaps / map files unavailable
@@ -107,7 +110,7 @@ def extinction_report(a0, tab: pd.DataFrame, teff_label, teff_pred) -> dict:
     a_sfd = 3.1 * 0.86 * e
     b = tab["b"].to_numpy(float)
     hb = np.abs(b) > 30
-    out.update({"n_hb": int(hb.sum()), "a0_hb_median": med(a0[hb]), "a_sfd_hb_median": med(a_sfd[hb]),
+    out.update({"spearman_a0_teff_hb": _spearman(a0[hb], teff_label[hb]), "n_hb": int(hb.sum()), "a0_hb_median": med(a0[hb]), "a_sfd_hb_median": med(a_sfd[hb]),
                 "pearson_a0_sfd_hb": float(np.corrcoef(a0[hb], a_sfd[hb])[0, 1]),
                 "spearman_a0_sfd_hb": _spearman(a0[hb], a_sfd[hb]),
                 "a0_minus_sfd_median": med(a0[hb] - a_sfd[hb]), "a0_minus_sfd_rstd": rstd(a0[hb] - a_sfd[hb])})

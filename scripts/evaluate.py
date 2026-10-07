@@ -185,7 +185,9 @@ def main() -> None:
             summary.append(_md(dtab))
             rc = red_clump(y, m, labels, dset.astro_arr, dout["mg"], dout["a0"],
                            dset.astro_arr["mag_ok"][:, 5])
-            ext = extinction_report(dout["a0"], dset.astro_table, y[:, labels.index("teff")], mu[:, labels.index("teff")])
+            ext = extinction_report(dout["a0"], dset.astro_table, y[:, labels.index("teff")], mu[:, labels.index("teff")],
+                                    nearby=(dset.astro_arr["plx"] - dset.astro_arr["zp"] > 10)
+                                    & ((dset.astro_arr["plx"] - dset.astro_arr["zp"]) > 10 * dset.astro_arr["plx_err"]))
             summary.append(f"\n**{split} red clump** (2.3<logg<2.6, 4500<Teff<5100, [M/H]>-0.6): {rc}\n")
             summary.append(f"\n**{split} extinction**: {ext}\n")
             np.savez(run / f"predictions_dist_{split}.npz", source_id=cat["source_id"].to_numpy(), **dout)
