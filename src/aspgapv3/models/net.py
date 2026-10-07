@@ -4,6 +4,9 @@ Label order is fixed at construction and stored in every checkpoint:
     atm  = cfg.labels.atm   (teff, logg, m_h)
     chem = cfg.labels.chem  (alpha_m, fe_h, mg_h, ...)
 
+Optional (off by default):
+    latent head  model.latent_head {source, dim, weight, hidden}: extra MLP on the trunk feature z
+               regressing a precomputed teacher latent (see scripts/build_v1_latent.py)
 Optional (P1, off by default):
     aux head   n_aux > 0: extra heteroscedastic head over auxiliary element
                abundances; trained with `labels.weight_aux`, never a science output
@@ -32,7 +35,8 @@ class XPChemNet(nn.Module):
                  n_atm: int = 3, n_chem: int = 3, embed_dim: int = 768,
                  side: dict | None = None, n_aux: int = 0,
                  chem_condition: str = "none", cond_logvar: bool = False,
-                 aux_condition: bool = True, input_norm_dim: int = 0):
+                 aux_condition: bool = True, input_norm_dim: int = 0,
+                 latent_dim: int = 0, latent_hidden: int = 512):
         super().__init__()
         if chem_condition not in CHEM_CONDITIONS:
             raise ValueError(f"model.heads.chem_condition must be one of "
@@ -57,6 +61,16 @@ class XPChemNet(nn.Module):
         self.aux_condition = bool(aux_condition) and chem_condition != "none"
         self.head_aux = HeteroscedasticHead(
             trunk_dim + (cond_dim if self.aux_condition else 0), n_aux) if n_aux > 0 else None
+        # optional auxiliary vector-regression head (latent distillation, e.g. the AspGap v1
+        # 1024-d latent). Reads the same trunk feature z as the label heads. 0 => absent
+        # (old state dicts load unchanged).
+        self.latent_dim = int(latent_dim)
+        if self.latent_dim > 0:
+            self.head_lat = nn.Linear(trunk_dim, self.latent_dim) if int(latent_hidden) <= 0 else nn.Sequential(
+                nn.Linear(trunk_dim, int(latent_hidden)), nn.GELU(),
+                nn.Linear(int(latent_hidden), self.latent_dim))
+        else:
+            self.head_lat = None
         side = side or {}
         self.side = SideFiLM(trunk_dim, list(side.get("scalars", [])),
                              bool(side.get("noise_channel", False))) \
@@ -90,6 +104,8 @@ class XPChemNet(nn.Module):
                "mu_chem": mu_c, "logvar_chem": lv_c}
         if self.head_aux is not None:
             out["mu_aux"], out["logvar_aux"] = self.head_aux(h_chem if self.aux_condition else z)
+        if self.head_lat is not None:
+            out["lat"] = self.head_lat(z)
         return out
 
     # -- parameter groups: encoder LR << head LR for Stage B/C --------------
@@ -132,6 +148,7 @@ def build_model(cfg: dict, n_atm: int, n_chem: int, n_aux: int = 0) -> XPChemNet
     in_norm_dim = int(enc_cfg.get("in_dim", 0)) if in_norm == "robust" else 0
     if in_norm == "robust" and in_norm_dim <= 0:
         raise ValueError("model.input_norm: robust needs model.encoder.in_dim")
+    lh = cfg["model"].get("latent_head") or {}
     return XPChemNet(encoder, trunk_dim=int(trunk["dim"]),
                      dropout=float(trunk["dropout"]),
                      n_atm=n_atm, n_chem=n_chem, embed_dim=embed_dim,
@@ -139,4 +156,6 @@ def build_model(cfg: dict, n_atm: int, n_chem: int, n_aux: int = 0) -> XPChemNet
                      chem_condition=str(heads.get("chem_condition", "none")),
                      cond_logvar=bool(heads.get("cond_logvar", False)),
                      aux_condition=bool(heads.get("aux_condition", True)),
-                     input_norm_dim=in_norm_dim)
+                     input_norm_dim=in_norm_dim,
+                     latent_dim=int(lh.get("dim", 0)) if lh.get("source") else 0,
+                     latent_hidden=int(lh.get("hidden", 512)))

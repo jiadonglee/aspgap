@@ -35,7 +35,7 @@ from aspgapv3.config import load_config, resolve_ckpt, save_config  # noqa: E402
 from aspgapv3.data.dataset import APOGEEDataset, input_dim  # noqa: E402
 from aspgapv3.data.sampler import make_sampler  # noqa: E402
 from aspgapv3.data.xp import aspgap_scaler_arrays  # noqa: E402
-from aspgapv3.losses import MaskedHeteroscedasticNLL, combine_losses  # noqa: E402
+from aspgapv3.losses import MaskedHeteroscedasticNLL, combine_losses, masked_latent_mse  # noqa: E402
 from aspgapv3.metrics import metrics_table  # noqa: E402
 from aspgapv3.models.net import build_model  # noqa: E402
 from aspgapv3.models.side import build_side  # noqa: E402
@@ -61,7 +61,7 @@ def evaluate(net, loader, device, loss_atm, loss_chem,
     part of the returned total (checkpoint selection stays chem/atm-only); it is
     written to extra["aux_nll"]."""
     net.eval()
-    tot, tot_c, tot_x, n = 0.0, 0.0, 0.0, 0
+    tot, tot_c, tot_x, tot_l, n = 0.0, 0.0, 0.0, 0.0, 0
     mus, sigmas, ys, ms = [], [], [], []
     for batch in loader:
         x = batch["x"].to(device, non_blocking=True)
@@ -80,6 +80,9 @@ def evaluate(net, loader, device, loss_atm, loss_chem,
         if loss_aux is not None and net.n_aux:
             tot_x += float(loss_aux(out["mu_aux"], out["logvar_aux"], batch["y_aux"].to(device),
                                     batch["yerr_aux"].to(device), batch["mask_aux"].to(device))) * bs
+        if "lat" in out and "lat" in batch:      # latent distillation head (monitoring only)
+            tot_l += float(masked_latent_mse(out["lat"], batch["lat"].to(device),
+                                             batch["lat_ok"].to(device))) * bs
         tot += float(l_all) * bs
         tot_c += float(l_chem) * bs
         n += bs
@@ -101,6 +104,7 @@ def evaluate(net, loader, device, loss_atm, loss_chem,
     table = metrics_table(mu_r, sig_r, y_r, m_r, scaler.labels)
     if extra is not None:
         extra["aux_nll"] = tot_x / max(n, 1)
+        extra["lat_mse"] = tot_l / max(n, 1)
     return tot / max(n, 1), tot_c / max(n, 1), table
 
 
@@ -164,9 +168,13 @@ def main() -> None:
     aspgap_sc = aspgap_scaler_arrays(root) if (need_aug and inp == "coef110n") else None
     req_valid = bool(cfg["data"].get("require_xp_valid", False))
     aux_names = list(cfg["labels"].get("aux") or [])      # P1: [] => old behaviour
+    lat_cfg = cfg["model"].get("latent_head") or {}       # latent distillation: absent => off
+    lat_src = lat_cfg.get("source") or None
+    w_lat = float(lat_cfg.get("weight", 0.0)) if lat_src else 0.0
     dsets = {s: APOGEEDataset(root, split=s, input=inp, noise=need_noise,
                               require_xp_valid=req_valid, aux=aux_names,
-                              aux_ref=str(cfg["labels"].get("aux_ref", "h"))) for s in
+                              aux_ref=str(cfg["labels"].get("aux_ref", "h")),
+                              latent=lat_src) for s in
              ("train", "val", "iid_test", "sky_test")}
     n_labels = len(dsets["train"].labels)
     n_atm = len(cfg["labels"]["atm"])
@@ -174,7 +182,11 @@ def main() -> None:
          "iid_test": len(dsets["iid_test"]), "sky_test": len(dsets["sky_test"]),
          "input": inp, "require_xp_valid": req_valid,
          "n_dropped_invalid": {s: d.n_dropped_invalid for s, d in dsets.items()},
-         "n_labels": n_labels, "labels": dsets["train"].labels, "aux": aux_names})
+         "n_labels": n_labels, "labels": dsets["train"].labels, "aux": aux_names,
+         **({"latent_head": {**lat_cfg, "dim_data": dsets["train"].latent_dim}} if lat_src else {})})
+    if lat_src and int(lat_cfg.get("dim", 0)) != dsets["train"].latent_dim:
+        raise ValueError(f"model.latent_head.dim={lat_cfg.get('dim')} != latent file dim "
+                         f"{dsets['train'].latent_dim}")
 
     sampler = make_sampler(dsets["train"], cfg["train"].get("sampler", {}))
     train_loader = DataLoader(
@@ -255,6 +267,25 @@ def main() -> None:
     opt = torch.optim.AdamW(groups)
     base_lrs = [g["lr"] for g in groups]
 
+    if lat_src:
+        # weight-choice diagnostic: label vs latent loss of the UNTRAINED net (eval mode) on
+        # a few clean val batches, so the latent weight can be set to a comparable magnitude
+        net.eval()
+        acc = np.zeros(3)
+        with torch.no_grad():
+            for i, b in enumerate(eval_loader("val")):
+                if i >= 4:
+                    break
+                o = float_outputs(net(b["x"].to(device), build_side(net, b)))
+                yb, eb, mb = (b[k].to(device) for k in ("y", "yerr", "mask"))
+                acc += [float(loss_atm(o["mu_atm"], o["logvar_atm"], yb[:, :n_atm], eb[:, :n_atm], mb[:, :n_atm])),
+                        float(loss_chem(o["mu_chem"], o["logvar_chem"], yb[:, n_atm:], eb[:, n_atm:], mb[:, n_atm:])),
+                        float(masked_latent_mse(o["lat"], b["lat"].to(device), b["lat_ok"].to(device)))]
+        acc /= 4
+        log({"event": "init_losses", "l_atm": acc[0], "l_chem": acc[1], "l_lat_mse": acc[2],
+             "label_total": acc[0] + acc[1], "weight_lat": w_lat,
+             "weighted_lat": w_lat * acc[2]})
+
     # ---- loop --------------------------------------------------------------
     scaler_amp = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
     clip = float(cfg["train"].get("grad_clip", 1.0))
@@ -269,6 +300,7 @@ def main() -> None:
         net.train()
         t0 = time.time()
         tr_loss, nb, n_nonfinite, n_aug, n_seen = 0.0, 0, 0, 0, 0
+        tr_lab, tr_lat = 0.0, 0.0
         for batch in train_loader:
             if p_aug > 0:
                 batch = augmenter(batch)
@@ -295,7 +327,11 @@ def main() -> None:
                            batch["yerr_aux"].to(device, non_blocking=True),
                            batch["mask_aux"].to(device, non_blocking=True)) \
                 if loss_aux is not None else None
-            loss = combine_losses(l_atm, l_chem, l_x, loss_mode, w_atm_glob, w_aux)
+            l_lat = masked_latent_mse(out["lat"], batch["lat"].to(device, non_blocking=True),
+                                      batch["lat_ok"].to(device, non_blocking=True)) \
+                if lat_src else None             # target = latent of the CLEAN input (never augmented)
+            loss = combine_losses(l_atm, l_chem, l_x, loss_mode, w_atm_glob, w_aux,
+                                  l_lat=l_lat, weight_lat=w_lat)
             if not torch.isfinite(loss):
                 n_nonfinite += 1
                 continue
@@ -310,15 +346,23 @@ def main() -> None:
             scaler_amp.step(opt)
             scaler_amp.update()
             tr_loss += float(loss)
+            if lat_src:
+                tr_lat += float(l_lat)
+                tr_lab += float(loss) - w_lat * float(l_lat)
             nb += 1
         ex = {}
         val, val_chem, table = evaluate(net, eval_loader("val"), device, loss_atm, loss_chem, amp,
                                         loss_aux=loss_aux, extra=ex)
         sel = val
         extra = {"val_aux_nll": ex["aux_nll"]} if aux_names else {}
+        if lat_src:
+            extra = {**extra, "train_label_loss": tr_lab / max(nb, 1), "train_lat_mse": tr_lat / max(nb, 1),
+                     "train_lat_weighted": w_lat * tr_lat / max(nb, 1), "val_lat_mse": ex["lat_mse"]}
         if val_deg_loader is not None:
-            val_d, _, table_d = evaluate(net, val_deg_loader, device, loss_atm, loss_chem, amp)
+            ex_d = {}
+            val_d, _, table_d = evaluate(net, val_deg_loader, device, loss_atm, loss_chem, amp, extra=ex_d)
             extra = {**extra, "val_loss_degraded": val_d,
+                     **({"val_lat_mse_degraded": ex_d["lat_mse"]} if lat_src else {}),
                      "val_rmse_degraded": {r0["label"]: round(r0["rmse"], 5)
                                            for _, r0 in table_d.iterrows() if r0.get("n", 0) > 0}}
             sel = {"clean": val, "degraded": val_d, "mean": 0.5 * (val + val_d)}[select_on]

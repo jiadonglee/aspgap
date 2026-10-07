@@ -47,7 +47,8 @@ def gaussian_nll_reduced(mu: torch.Tensor, logvar: torch.Tensor,
 LOSS_WEIGHTINGS = ("per_group", "global")
 
 
-def combine_losses(l_atm, l_chem, l_aux, mode: str, weight_atm: float, weight_aux: float):
+def combine_losses(l_atm, l_chem, l_aux, mode: str, weight_atm: float, weight_aux: float,
+                   l_lat=None, weight_lat: float = 0.0):
     """Total loss from the per-group masked NLLs (each already normalised by its
     own sum(mask*w), which cancels any uniform per-label weight).
 
@@ -56,11 +57,24 @@ def combine_losses(l_atm, l_chem, l_aux, mode: str, weight_atm: float, weight_au
     global: weight_atm * l_atm + 1.0 * l_chem + weight_aux * l_aux, i.e. every group's
         per-group-normalised loss is scaled by its configured weight (chem = 1), so
         weight_atm / weight_aux are true relative weights.
-    l_aux may be None (no aux head)."""
+    l_aux may be None (no aux head). l_lat (optional latent-distillation MSE) is added as
+    weight_lat * l_lat in either mode; None => exactly the old total."""
     if mode not in LOSS_WEIGHTINGS:
         raise ValueError(f"labels.loss_weighting must be one of {LOSS_WEIGHTINGS}, got {mode!r}")
     wa = weight_atm if mode == "global" else 1.0
     total = wa * l_atm + l_chem
     if l_aux is not None:
         total = total + weight_aux * l_aux
+    if l_lat is not None:
+        total = total + weight_lat * l_lat
     return total
+
+
+def masked_latent_mse(pred: torch.Tensor, target: torch.Tensor, ok: torch.Tensor | None = None):
+    """MSE between the latent head output and the standardized teacher latent, always in
+    fp32, mean over latent dims, then over the rows with ok=True. pred/target (B, D)."""
+    se = ((pred.float() - target.float()) ** 2).mean(1)
+    if ok is None:
+        return se.mean()
+    w = ok.to(se.dtype)
+    return (se * w).sum() / w.sum().clamp_min(1.0)

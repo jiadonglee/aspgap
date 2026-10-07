@@ -118,7 +118,8 @@ class APOGEEDataset(Dataset):
     def __init__(self, root: str | Path, split: str = "train",
                  input: str = "xp343", labels: list[str] | None = None,
                  noise: bool = False, require_xp_valid: bool = False,
-                 aux: list[str] | None = None, aux_ref: str = "h"):
+                 aux: list[str] | None = None, aux_ref: str = "h",
+                 latent: str | None = None):
         if aux_ref not in ("h", "fe"):
             raise ValueError(f"labels.aux_ref must be h|fe, got {aux_ref!r}")
         self.aux_ref = aux_ref
@@ -182,6 +183,13 @@ class APOGEEDataset(Dataset):
         if self.aux_labels:
             self._load_aux(cat)
 
+        # teacher latent target (v1_latent.npy + v1_latent_norm.npz, scripts/build_v1_latent.py):
+        # row-indexed like the other arrays, standardized with TRAIN-split stats. Always the
+        # latent of the CLEAN input (the augmenter never touches it).
+        self.latent = latent
+        if latent:
+            self._load_latent(cat, latent)
+
         # per-label sample weights can be attached later by the trainer
         self.label_weights = np.ones(len(self.labels), dtype=np.float32)
 
@@ -222,6 +230,24 @@ class APOGEEDataset(Dataset):
         self.yerr_aux = self.aux_scaler.transform_err(yerr).astype(np.float32)
         self.floor_aux = self.aux_scaler.floor_norm.astype(np.float32)
 
+    def _load_latent(self, full_cat: pd.DataFrame, source: str) -> None:
+        if source != "v1_latent":
+            raise ValueError(f"model.latent_head.source must be v1_latent, got {source!r}")
+        fl, fn = self.root / "v1_latent.npy", self.root / "v1_latent_norm.npz"
+        for f in (fl, fn):
+            if not f.is_file():
+                raise FileNotFoundError(f"latent_head.source=v1_latent but {f} is missing; "
+                                        f"run scripts/build_v1_latent.py --root {self.root}")
+        z = np.load(fn, allow_pickle=False)
+        full_sid = full_cat.sort_values("row")["source_id"].to_numpy().astype(np.int64)
+        self.lat_arr = np.load(fl, mmap_mode="r")
+        if len(full_sid) != len(self.lat_arr) or not np.array_equal(z["source_id"], full_sid):
+            raise ValueError(f"{fl} is not aligned with catalog row order (source_id mismatch)")
+        self.lat_mean = z["mean"].astype(np.float32)
+        self.lat_std = np.maximum(z["std"].astype(np.float32), 1e-4)
+        self.lat_valid = z["valid"].astype(bool)
+        self.latent_dim = int(self.lat_arr.shape[1])
+
     def _aux_over_fe(self, z, sc, col, full_cat):
         """[X/Fe] targets for ALL catalog rows: y = X_H - fe_h (main label),
         err = sqrt(e_X^2 + e_Fe^2) -- the correlated part of the two ASPCAP
@@ -255,6 +281,10 @@ class APOGEEDataset(Dataset):
                      "side": torch.from_numpy(np.array(self.side[row], np.float32)),
                      "coef": torch.from_numpy(np.array(self.coef[row], np.float32)),
                      "valid": torch.tensor(bool(self.valid[row]))}
+        if self.latent:
+            lat = (np.asarray(self.lat_arr[row], np.float32) - self.lat_mean) / self.lat_std
+            extra = {**extra, "lat": torch.from_numpy(lat),
+                     "lat_ok": torch.tensor(bool(self.lat_valid[row]))}
         if self.aux_labels:
             extra = {**extra,
                      "y_aux": torch.from_numpy(np.nan_to_num(self.y_aux[i])),
