@@ -14,15 +14,15 @@ from test_evaluate_filtered import make_root
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_train(tmp_path, monkeypatch, train_extra):
+def run_train(tmp_path, monkeypatch, train_extra, model=None, ckpt=False):
     (tmp_path / "data_root").mkdir()
     make_root(tmp_path / "data_root")
     cfg = {"inherit": str(ROOT / "configs" / "base.yaml"),
            "run": {"name": "t", "out_dir": str(tmp_path / "runs"), "device": "cpu"},
            "data": {"root": str(tmp_path / "data_root"), "input": "xp343", "require_xp_valid": True},
-           "model": {"encoder": {"type": "scratch", "d_model": 32, "n_layers": 1, "n_heads": 4,
-                                 "embed_dim": 768, "unfreeze_last_k": -1},
-                     "trunk": {"dim": 64, "dropout": 0.0}},
+           "model": model or {"encoder": {"type": "scratch", "d_model": 32, "n_layers": 1, "n_heads": 4,
+                                          "embed_dim": 768, "unfreeze_last_k": -1},
+                              "trunk": {"dim": 64, "dropout": 0.0}},
            "train": {"epochs": 1, "batch_size": 16, "num_workers": 0, "lr_enc": 1e-4, "amp": False,
                      "sampler": {"type": "random"}, **train_extra}}
     f = tmp_path / "cfg.yaml"
@@ -34,7 +34,7 @@ def run_train(tmp_path, monkeypatch, train_extra):
     monkeypatch.setattr(sys, "argv", ["train.py", "--config", str(f)])
     mod.main()
     rows = [json.loads(l) for l in (tmp_path / "runs" / "t" / "log.jsonl").read_text().splitlines()]
-    return rows
+    return (rows, tmp_path / "runs" / "t") if ckpt else rows
 
 
 def test_select_mean_with_p0_computes_degraded_val_without_training_aug(tmp_path, monkeypatch):

@@ -32,7 +32,7 @@ class XPChemNet(nn.Module):
                  n_atm: int = 3, n_chem: int = 3, embed_dim: int = 768,
                  side: dict | None = None, n_aux: int = 0,
                  chem_condition: str = "none", cond_logvar: bool = False,
-                 aux_condition: bool = True):
+                 aux_condition: bool = True, input_norm_dim: int = 0):
         super().__init__()
         if chem_condition not in CHEM_CONDITIONS:
             raise ValueError(f"model.heads.chem_condition must be one of "
@@ -40,6 +40,13 @@ class XPChemNet(nn.Module):
         if chem_condition != "none" and n_atm == 0:
             raise ValueError("chem_condition needs at least one atm label")
         self.encoder = encoder
+        # optional per-input standardisation (x - center) / scale applied inside the
+        # network, so augmented / degraded inputs get exactly the same transform and
+        # the train-split stats travel in the checkpoint. 0 => absent (old state dicts).
+        self.input_norm = input_norm_dim > 0
+        if self.input_norm:
+            self.register_buffer("in_center", torch.zeros(input_norm_dim))
+            self.register_buffer("in_scale", torch.ones(input_norm_dim))
         self.trunk = Trunk(embed_dim, trunk_dim, dropout)
         self.head_atm = HeteroscedasticHead(trunk_dim, n_atm)
         self.chem_condition, self.cond_logvar = chem_condition, bool(cond_logvar)
@@ -55,10 +62,16 @@ class XPChemNet(nn.Module):
                              bool(side.get("noise_channel", False))) \
             if (side.get("scalars") or side.get("noise_channel")) else None
 
+    def set_input_stats(self, center, scale) -> None:
+        self.in_center.copy_(torch.as_tensor(center, dtype=torch.float32))
+        self.in_scale.copy_(torch.as_tensor(scale, dtype=torch.float32).clamp_min(1e-4))
+
     def forward(self, x: torch.Tensor, side: dict | None = None) -> dict:
         """x (B, in_dim); side = {"scalars": (B,S) raw side columns,
         "sigma": (B,343) xp343_sigma} or None. A model built with a `side`
         config but called with side=None behaves as the unconditioned model."""
+        if self.input_norm:
+            x = (x - self.in_center) / self.in_scale
         z768 = self.encoder(x)
         z = self.trunk(z768)
         if self.side is not None and side is not None:
@@ -113,10 +126,17 @@ def build_model(cfg: dict, n_atm: int, n_chem: int, n_aux: int = 0) -> XPChemNet
     embed_dim = int(getattr(encoder, "out_dim", embed_dim))
     trunk = cfg["model"]["trunk"]
     heads = cfg["model"].get("heads") or {}
+    in_norm = cfg["model"].get("input_norm")
+    if in_norm not in (None, "none", "robust"):
+        raise ValueError(f"model.input_norm must be none|robust, got {in_norm!r}")
+    in_norm_dim = int(enc_cfg.get("in_dim", 0)) if in_norm == "robust" else 0
+    if in_norm == "robust" and in_norm_dim <= 0:
+        raise ValueError("model.input_norm: robust needs model.encoder.in_dim")
     return XPChemNet(encoder, trunk_dim=int(trunk["dim"]),
                      dropout=float(trunk["dropout"]),
                      n_atm=n_atm, n_chem=n_chem, embed_dim=embed_dim,
                      side=cfg["model"].get("side"), n_aux=n_aux,
                      chem_condition=str(heads.get("chem_condition", "none")),
                      cond_logvar=bool(heads.get("cond_logvar", False)),
-                     aux_condition=bool(heads.get("aux_condition", True)))
+                     aux_condition=bool(heads.get("aux_condition", True)),
+                     input_norm_dim=in_norm_dim)

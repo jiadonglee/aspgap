@@ -1,0 +1,14 @@
+# aspgap110_aug + P1 (aux [X/Fe] labels + atm-detached conditioning of H_chem).
+inherit: aspgap110_aug.yaml
+
+run:
+  name: aspgap110_aug_p1
+
+labels:
+  aux: [c_h, n_h, o_h, si_h, ca_h, ti_h, al_h, mn_h, ni_h]
+  aux_ref: fe
+  weight_aux: 0.3
+
+model:
+  heads:
+    chem_condition: atm_detached

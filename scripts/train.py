@@ -209,6 +209,16 @@ def main() -> None:
         loss_aux = MaskedHeteroscedasticNLL(torch.ones(len(aux_names)),
                                             torch.as_tensor(dset.floor_aux), clamp).to(device)
 
+    if net.input_norm:                                       # RobustScaler-like, clean TRAIN set
+        rng = np.random.default_rng(seed)
+        ix = dset.indices if len(dset.indices) <= 200_000 else \
+            np.sort(rng.choice(dset.indices, 200_000, replace=False))
+        xs = np.asarray(dset.x[ix], np.float64)
+        q25, med, q75 = np.nanpercentile(xs, [25, 50, 75], axis=0)
+        net.set_input_stats(med, q75 - q25)
+        log({"event": "input_norm", "n": int(len(ix)), "iqr_min": float((q75 - q25).min()),
+             "iqr_median": float(np.median(q75 - q25))})
+        del xs
     if net.side is not None and net.side.scalars:           # train-split stats
         cols = net.side.cols
         sd = np.asarray(dset.side[dset.indices][:, cols], np.float64)

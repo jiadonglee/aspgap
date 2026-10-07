@@ -1,0 +1,20 @@
+# Pixel-space analogue of aspgap110_aug (basis-agnostic for DR4): the 343-pixel,
+# 550nm-normalised XP spectrum goes through a per-pixel RobustScaler-like
+# standardisation (train-split median / IQR, stored in the checkpoint, applied inside
+# the network so augmented/degraded spectra are standardised identically) into the
+# same MLP as the AspGap baseline (CoeffMLPEncoder, in_dim 343). No side inputs.
+inherit: aspgap110_aug.yaml
+
+run:
+  name: mlp343_aug
+
+data:
+  input: xp343
+
+model:
+  input_norm: robust
+  encoder:
+    type: coeff_mlp
+    in_dim: 343
+    embed_dim: 768
+    unfreeze_last_k: -1

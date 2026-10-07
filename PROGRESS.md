@@ -1,5 +1,17 @@
 # PROGRESS
 
+## 2026-10-07 — mlp343_aug, P1 on the MLPs, queue v3e
+
+- aspgap110_aug_r2 beat pixel_fusion_r2 at the faint end: augmentation, not SpecCLIP, drives the gain.
+  New configs: `mlp343_aug` (xp343 -> in-network per-pixel median/IQR standardisation, stats from the
+  clean train set (<=200k rows) stored as checkpoint buffers `in_center/in_scale`, `model.input_norm:
+  robust` -> CoeffMLPEncoder(in_dim=343); no side inputs), `aspgap110_aug_p1`, `mlp343_aug_p1`
+  (aux [X/Fe] + atm_detached). `CoeffMLPEncoder` gained `in_dim` (default 110, old state dicts unchanged).
+- Waiters v3c/v3d killed (v3d first). v3b had already finished at 05:29; v3c had therefore already started
+  pixel_fusion_p1_r2 (PID 1835292, left running as an orphan). v3e waits for it, evaluates it in its
+  slot and runs the new order: mlp343_aug, aspgap110_aug_p1, mlp343_aug_p1, pixel_fusion_noaug,
+  pixel_fusion_p1 (eval only), auxonly, condonly.
+
 ## 2026-10-05 (night, review fixes on p1)
 
 - Aux targets switchable to [X/Fe] (`labels.aux_ref: fe`, set in pixel_fusion_p1 and _auxonly):

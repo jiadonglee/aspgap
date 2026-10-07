@@ -166,15 +166,16 @@ class ScratchXPTransformer(nn.Module):
 
 
 class CoeffMLPEncoder(nn.Module):
-    """AspGap-style baseline: 110 BP/RP coefficients -> MLP -> 768."""
+    """AspGap-style baseline: 110 BP/RP coefficients (or `in_dim` inputs, e.g. the
+    343 XP pixels of mlp343_aug) -> MLP -> 768."""
 
     def __init__(self, embed_dim: int = SPECCLIP_EMBED_DIM, hidden: int = 512,
-                 dropout: float = 0.1, unfreeze_last_k: int = -1, **_):
+                 dropout: float = 0.1, unfreeze_last_k: int = -1, in_dim: int = 110, **_):
         super().__init__()
         if unfreeze_last_k != -1:
             raise ValueError("coeff_mlp encoder trains fully; unfreeze_last_k=-1")
         self.net = nn.Sequential(
-            nn.Linear(110, hidden), nn.LayerNorm(hidden), nn.GELU(),
+            nn.Linear(in_dim, hidden), nn.LayerNorm(hidden), nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden, embed_dim), nn.LayerNorm(embed_dim),
         )
