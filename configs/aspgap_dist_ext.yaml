@@ -1,0 +1,11 @@
+# aspgap_dist trained on the APOGEE set + external labels (GALAH DR4 dwarfs/hot/metal-poor stars,
+# globular-cluster members with cluster-level [M/H], LAMOST VMP stars with [M/H]); nothing else changes.
+# Data root = APOGEE root + appended train-only rows (scripts/build_ext_dataset.py). Validation and
+# model selection stay on the unchanged APOGEE val split; iid/sky tests are the unchanged APOGEE ones.
+inherit: aspgap_dist.yaml
+
+run:
+  name: aspgap_dist_ext
+
+data:
+  root: data/processed/aspcap_v0.6.0_ext

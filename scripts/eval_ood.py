@@ -41,6 +41,9 @@ LABELS = ["teff", "logg", "m_h", "alpha_m"]
 SKIP = {("cluster_gc", "alpha_m")}                  # nominal GC alpha: only its spread is meaningful
 EXT_G = 0.789
 V1_DIR = "aspgap_v1_ref"
+HOLDOUT = False                                      # --holdout: only the OOD stars NOT used for training the ext model
+OUTSUB, SUMDIR = "ood", "ood_summary"
+HELD_COMPS = ("galah", "cluster_gc", "lamost_vmp")   # components split into train / held-out parts (build_ext_dataset.py)
 
 
 def md(df: pd.DataFrame, fmt: str = ".3f") -> str:
@@ -91,7 +94,8 @@ class NetPredictor:
         self.net.load_state_dict(ck["state_dict"])
         self.net.eval()
         assert self.net.side is None, "side-conditioned nets are not supported here"
-        sc = LabelScaler.load(cfg["data"]["root"] if Path(cfg["data"]["root"]).is_dir() else ROOT)
+        self.root = REPO / cfg["data"]["root"] if (REPO / cfg["data"]["root"]).is_dir() else ROOT
+        sc = LabelScaler.load(self.root)
         sel = [sc.labels.index(n) for n in self.labels]
         self.mean, self.std = sc.mean[sel], sc.std[sel]
         self.device, self.has_dist = device, self.net.has_distance
@@ -146,14 +150,22 @@ class V1Predictor:
 def read_comp(name: str):
     t = pq.read_table(OODDIR / f"ood_{name}.parquet")
     x = np.asarray(t.column("x").combine_chunks().values, dtype=np.float32).reshape(-1, 110)
-    return t.drop(["x"]).to_pandas(), x
+    df = t.drop(["x"]).to_pandas()
+    if HOLDOUT:
+        sp = pd.read_parquet(OODDIR / "ood_split.parquet")
+        keep = ~df.source_id.isin(sp.source_id[sp.role == "train"])          # never a star any model variant trained on
+        if name in HELD_COMPS:
+            keep &= df.source_id.isin(sp.source_id[(sp.component == name) & (sp.role == "heldout")])
+        keep = keep.to_numpy()
+        df, x = df[keep].reset_index(drop=True), x[keep]
+    return df, x
 
 
 # ------------------------------------------------------------------ one run
 def evaluate_run(arg: str, device: str) -> Path:
     from aspgapv3.ood import LatentKnnOOD
     is_v1 = arg == "v1"
-    out = RUNS / (V1_DIR if is_v1 else Path(arg).name) / "ood"
+    out = RUNS / (V1_DIR if is_v1 else Path(arg).name) / OUTSUB
     out.mkdir(parents=True, exist_ok=True)
     pred = V1Predictor(device) if is_v1 else NetPredictor(Path(arg) if Path(arg).is_dir() else RUNS / arg, device)
     meta = json.loads((OODDIR / "ood_meta.json").read_text())
@@ -161,9 +173,10 @@ def evaluate_run(arg: str, device: str) -> Path:
     knn_edges = [0.0, qs["0.5"], qs["0.9"], qs["0.99"], qs["0.999"], np.inf]
     knn_names = ["<ID p50", "ID p50-90", "ID p90-99", "ID p99-99.9", ">ID p99.9"]
 
-    # ---- training-set references: input Mahalanobis, embedding kNN, in-distribution MAD
-    cat = pd.read_parquet(ROOT / "catalog.parquet", columns=["row", "split"])
-    X = np.load(ROOT / "coef110n.npy", mmap_mode="r")
+    # ---- training-set references (the model's own training set): input Mahalanobis, embedding kNN, in-distribution MAD
+    ref = getattr(pred, "root", ROOT)
+    cat = pd.read_parquet(ref / "catalog.parquet", columns=["row", "split"])
+    X = np.load(ref / "coef110n.npy", mmap_mode="r")
     tr_rows = cat.row[cat.split == "train"].to_numpy()
     xt = np.asarray(X[np.sort(tr_rows)], np.float64)
     mu_x = xt.mean(0)
@@ -180,7 +193,7 @@ def evaluate_run(arg: str, device: str) -> Path:
         return np.log10(np.einsum("ij,jk,ik->i", d, P, d)), np.log10(knn.score(z, device=device) + 1e-9)
 
     te_rows = cat.row[cat.split == "iid_test"].to_numpy()
-    z_ = np.load(ROOT / "labels.npz")
+    z_ = np.load(ref / "labels.npz")
     names = [str(s) for s in z_["labels"]]
     y_id = np.stack([np.where(z_["mask"][te_rows, names.index(l)], z_["y"][te_rows, names.index(l)], np.nan) for l in LABELS], 1)
     p_id = pred(np.asarray(X[te_rows], np.float32))
@@ -193,11 +206,13 @@ def evaluate_run(arg: str, device: str) -> Path:
     log_id = {"maha": md_id, "zknn": zk_id, "sigma": p_id["sigma"]}
 
     rows_c, rows_b, rows_cl, rows_d, rows_a, rows_oa = [], [], [], [], [], []
+    counts = {}
     pooled = {}
     for comp in COMPS:
         if not (OODDIR / f"ood_{comp}.parquet").exists():
             continue
         df, x = read_comp(comp)
+        counts[comp] = dict(n=len(df), n_clusters=int(df.cluster.nunique()) if "cluster" in df else 0)
         p = pred(x)
         mdist, zk = flags(x, p["z"])
         res = pd.DataFrame({"source_id": df.source_id})
@@ -321,6 +336,7 @@ def evaluate_run(arg: str, device: str) -> Path:
     for nm, rws in (("components", rows_c), ("binned", rows_b), ("clusters", rows_cl), ("distance", rows_d),
                     ("auc", rows_a), ("auc_vs_apogee_test", rows_oa)):
         pd.DataFrame(rws).to_csv(out / f"metrics_{nm}.csv", index=False)
+    (out / "counts.json").write_text(json.dumps(counts))
     write_run_report(out, pred.name, meta)
     return out
 
@@ -349,12 +365,13 @@ def write_run_report(out: Path, name: str, meta: dict) -> None:
 
 # ------------------------------------------------------------------ summary
 def write_summary(runs: list[str]) -> None:
-    dirs = {("v1" if a == "v1" else Path(a).name): RUNS / (V1_DIR if a == "v1" else Path(a).name) / "ood" for a in runs}
+    dirs = {("v1" if a == "v1" else Path(a).name): RUNS / (V1_DIR if a == "v1" else Path(a).name) / OUTSUB for a in runs}
     meta = json.loads((OODDIR / "ood_meta.json").read_text())
-    fnd = RUNS / "ood_summary" / "findings.md"
+    fnd = RUNS / SUMDIR / "findings.md"
     S = [fnd.read_text() if fnd.exists() else "", "# OOD summary\n", f"Models: {', '.join(dirs)}.  Error = model - external label.\n",
          "## Test-set sizes (after removing APOGEE-catalogue stars, with XP and G<17.65)\n",
-         md(pd.DataFrame([dict(component=k, **v) for k, v in meta["counts"].items()]), ".0f"),
+         md(pd.DataFrame([dict(component=k, **v) for k, v in meta["counts"].items()]) if not HOLDOUT else
+            pd.DataFrame([dict(component=k, **v) for k, v in json.loads((next(iter(dirs.values())) / "counts.json").read_text()).items()]), ".0f"),
          "## Label-scale conversions used\n", "```json\n" + json.dumps({"galah_scale": meta.get("galah_scale"), "galah_apogee_overlap": meta.get("galah_apogee_overlap"),
                                                                         "gc_scale": {k: v for k, v in meta.get("gc_scale", {}).items() if k != "table"}},
                                                                        indent=1, default=float) + "\n```\n"]
@@ -414,7 +431,7 @@ def write_summary(runs: list[str]) -> None:
     S += ["## OOD-flag AUC: |err| > 3 x ID MAD vs flag\n"]
     S += [md(pivot("auc", ["component", "label", "flag"], ["auc"]), ".3f")]
     S += ["## Flag AUC: component vs APOGEE iid_test stars\n", md(pivot("auc_vs_apogee_test", ["component", "flag"], ["auc_vs_apogee_test"]), ".3f")]
-    od = RUNS / "ood_summary"
+    od = RUNS / SUMDIR
     od.mkdir(exist_ok=True)
     (od / "report.md").write_text("\n".join(S))
 
@@ -423,7 +440,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", nargs="+", required=True, help="run dir/name (relative names resolve under runs/); 'v1' = AspGap v1")
     ap.add_argument("--summary-only", action="store_true")
+    ap.add_argument("--holdout", action="store_true",
+                    help="evaluate only the held-out OOD stars (ood_split.parquet, written by build_ext_dataset.py): outputs "
+                         "<run>/ood_holdout and runs/ood_summary_holdout")
     args = ap.parse_args()
+    global HOLDOUT, OUTSUB, SUMDIR
+    if args.holdout:
+        HOLDOUT, OUTSUB, SUMDIR = True, "ood_holdout", "ood_summary_holdout"
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     if not args.summary_only:
         for r in args.run:
