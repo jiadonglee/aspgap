@@ -45,7 +45,10 @@ REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / "src"))
 ROOT = REPO / "data/processed/aspcap_v0.6.0"
-EXT = REPO / "data/processed/aspcap_v0.6.0_ext"
+EXT1 = REPO / "data/processed/aspcap_v0.6.0_ext"
+EXT = EXT1                                               # output root; reassigned to ..._ext2 by `--variant ext2` (see main)
+EXT2 = REPO / "data/processed/aspcap_v0.6.0_ext2"
+RAW = REPO / "data/raw/ood"
 OODDIR = REPO / "data/processed/ood"
 LABELS = ["teff", "logg", "m_h", "alpha_m", "fe_h", "mg_h"]       # labels.npz column order
 NSIDE_LEVEL = 5                                                     # nside = 32
@@ -55,6 +58,13 @@ GC_GMAX, GC_CAP, GC_RUWE = 17.5, 300, 1.4
 OMEGA_CEN = "NGC 5139"
 FLOOR_EXTRA_MH_APO, E_MH_GC_FIT = 0.08, 0.10
 VMP_E_MH_MAX = 0.35
+# ext2: stricter GC training members (everything else, incl. held-out clusters, GALAH and VMP splits, is identical to ext)
+GC2_CAP = 100                      # members per cluster (random, SEED)
+GC2_EBV_MAX = 0.5                  # Harris 2010 E(B-V): drop heavily reddened clusters
+GC2_PM_CHI2 = 9.0                  # per-star PM chi2 (2 dof) vs the VB21 cluster mean PM
+GC2_PLX_NSIG = 3.0                 # |plx - plx_cl| < 3 sigma
+GC2_PLX_SYS = 0.02                 # mas, Gaia parallax systematics added in quadrature
+GC2_PM_SINT_FLOOR = 0.03           # mas/yr, floor of the per-cluster intrinsic PM dispersion
 
 
 def log(*a):
@@ -110,6 +120,79 @@ def c_star(bp_rp, c_ex, g):
     return np.asarray(c_ex, float) - f, 0.0059898 + 8.817481e-12 * np.asarray(g, float) ** 7.618399
 
 
+
+# ------------------------------------------------------------------ ext2: GC astrometric consistency
+def harris_ebv() -> dict:
+    """Harris (2010) E(B-V) per cluster (name key -> E(B-V))."""
+    from build_ood import _name_key
+    import re
+    lines = (RAW / "harris10_mwgc.dat").read_text().splitlines()
+    i0 = next(i for i, l in enumerate(lines) if "[Fe/H]" in l and "E(B-V)" in l)
+    out = {}
+    for l in lines[i0 + 1:]:
+        m = re.match(r"^\s*(\S.*?)\s+(-?\d+\.\d\d)\s+(\d+)\s+(\d+\.\d\d)", l)
+        if m:
+            out[_name_key(m.group(1))] = float(m.group(4))
+        elif out and not l.strip():
+            break
+    return out
+
+
+def vb21_members() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(per-star Gaia EDR3 pm/plx of the VB21 members (prob>0.7, qflag>=2), VB21 cluster mean PM table)."""
+    import re
+    import zipfile
+    from build_ood import _name_key
+    tab = pd.read_fwf(RAW / "tablea1.dat", colspecs=[(0, 12), (40, 47), (48, 55), (56, 63), (64, 71), (72, 79)],
+                      names=["name", "pmra_cl", "e_pmra_cl", "pmdec_cl", "e_pmdec_cl", "corr_cl"])
+    tab["name"] = tab["name"].str.strip()
+    keys = {_name_key(n): n for n in tab.name}
+    z = zipfile.ZipFile(RAW / "vb21_clusters.zip")
+    rows = []
+    for fn in z.namelist():
+        if not fn.startswith("catalogues/") or not fn.endswith(".txt"):
+            continue
+        cands = [k for k in keys if _name_key(fn[len("catalogues/"):-4]).startswith(k)]
+        if not cands:
+            continue
+        d = pd.read_csv(z.open(fn), sep=r"\s+", comment="#", header=None,
+                        names=["source_id", "ra", "dec", "x", "y", "plx", "pmra", "pmdec", "plxe", "pmrae", "pmdece", "pmcorr",
+                               "g_mag", "bp_rp", "Sigma", "qflag", "memberprob"])
+        d = d[(d.memberprob > 0.7) & (d.qflag >= 2)].copy()
+        d["cluster"] = keys[max(cands, key=len)]
+        rows.append(d[["source_id", "cluster", "pmra", "pmdec", "pmrae", "pmdece", "pmcorr"]])
+    return pd.concat(rows, ignore_index=True), tab
+
+
+def gc_astrometric_consistency(gc: pd.DataFrame) -> pd.DataFrame:
+    """Per star of `gc` (ood_cluster_gc rows): chi2_pm vs the VB21 cluster mean PM (star covariance + cluster-mean covariance +
+    per-cluster intrinsic dispersion s_int^2 * I, s_int estimated robustly from the cluster's own members:
+    s_int^2 = max(0, (1.4826 MAD)^2 - median(err^2)), averaged over the two axes, floored) and the parallax pull
+    (plx - zpt - 1/d_BV21) / sqrt(plx_err^2 + sys^2)."""
+    mem, cl = vb21_members()
+    m = gc[["source_id", "cluster"]].merge(mem, on=["source_id", "cluster"], how="left")
+    c = cl.set_index("name")
+    n = len(m)
+    dra = m.pmra.to_numpy() - m.cluster.map(c.pmra_cl).to_numpy()
+    dde = m.pmdec.to_numpy() - m.cluster.map(c.pmdec_cl).to_numpy()
+    ea, ed, rho = m.pmrae.to_numpy(), m.pmdece.to_numpy(), m.pmcorr.to_numpy()
+    sint = {}
+    for k, g in pd.DataFrame({"cluster": m.cluster, "dra": dra, "dde": dde, "ea": ea, "ed": ed}).dropna().groupby("cluster"):
+        v = []
+        for d, e in ((g.dra, g.ea), (g.dde, g.ed)):
+            mad = 1.4826 * np.median(np.abs(d - np.median(d)))
+            v.append(max(0.0, mad ** 2 - np.median(e ** 2)))
+        sint[k] = max(float(np.sqrt(np.mean(v))), GC2_PM_SINT_FLOOR)
+    s2 = m.cluster.map(sint).to_numpy() ** 2
+    ca, cd, cr = m.cluster.map(c.e_pmra_cl).to_numpy(), m.cluster.map(c.e_pmdec_cl).to_numpy(), m.cluster.map(c.corr_cl).to_numpy()
+    caa, cdd, cad = ea ** 2 + s2 + ca ** 2, ed ** 2 + s2 + cd ** 2, rho * ea * ed + cr * ca * cd
+    det = caa * cdd - cad ** 2
+    chi2 = (cdd * dra ** 2 - 2 * cad * dra * dde + caa * dde ** 2) / det
+    plx_cl = 1000.0 / gc.dist_pc.to_numpy() if "dist_pc" in gc else 1000.0 / (10.0 ** (gc.mu_true.to_numpy() / 5.0 + 1.0))
+    pull = (gc.parallax.to_numpy() - gc.zpt.to_numpy() - plx_cl) / np.sqrt(gc.parallax_error.to_numpy() ** 2 + GC2_PLX_SYS ** 2)
+    return pd.DataFrame({"chi2_pm": chi2, "plx_pull": pull, "pm_sint": m.cluster.map(sint).to_numpy()}, index=gc.index)
+
+
 # ------------------------------------------------------------------ selection
 def read_ood(name: str, with_x: bool = False):
     t = pq.read_table(OODDIR / f"ood_{name}.parquet")
@@ -119,7 +202,7 @@ def read_ood(name: str, with_x: bool = False):
     return df
 
 
-def select(meta: dict) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
+def select(meta: dict, v2: bool = False) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
     """Returns (train table with columns source_id source label cols, x (n,110), split table for all components)."""
     apo = pd.read_parquet(ROOT / "catalog.parquet", columns=["source_id", "split", "teff"])
     z = np.load(ROOT / "labels.npz")
@@ -152,9 +235,51 @@ def select(meta: dict) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
     rcut = np.where(nmem >= 100, np.maximum(0.5, q20), 0.0)
     good &= gc.r_arcmin >= rcut
     in_train_cl = ~gc.cluster.isin(held)
-    cand = gc[good & in_train_cl].copy()
+    base = good & in_train_cl                                     # ext_r1 quality + core cut (before the cap)
+    if v2:
+        ebv = pd.Series({k: v for k, v in harris_ebv().items()})
+        from build_ood import _name_key
+        ebv_c = gc.cluster.map(lambda n: ebv.get(_name_key(n), np.nan)).astype(float)
+        astro = gc_astrometric_consistency(gc)
+        ok_ebv = (ebv_c <= GC2_EBV_MAX).to_numpy()
+        ok_pm = (astro.chi2_pm < GC2_PM_CHI2).to_numpy()
+        ok_plx = (astro.plx_pull.abs() < GC2_PLX_NSIG).to_numpy()
+        steps = [("train clusters, all members", in_train_cl.to_numpy()), ("+ G<17.5, RUWE, C*, core cut (= ext_r1 quality)", base.to_numpy())]
+        cur = base.to_numpy()
+        for nm, ok in (("+ E(B-V)_Harris <= 0.5", ok_ebv), ("+ PM chi2 < 9", ok_pm), ("+ parallax within 3 sigma", ok_plx)):
+            cur = cur & ok
+            steps.append((nm, cur.copy()))
+        cand_pool = gc[cur].copy()
+        diag = dict(steps=[dict(cut=nm, n_stars=int(k.sum()), n_clusters=int(gc.cluster[k].nunique())) for nm, k in steps])
+        # kept vs dropped (among the ext_r1-quality stars)
+        b = base.to_numpy()
+        grp = {"kept (all cuts)": cur, "dropped by E(B-V)": b & ~ok_ebv, "dropped by PM (E(B-V) ok)": b & ok_ebv & ~ok_pm,
+               "dropped by parallax (E(B-V), PM ok)": b & ok_ebv & ok_pm & ~ok_plx}
+        diag["groups"] = [dict(group=k, n=int(v.sum()), G_median=float(gc.G[v].median()), bp_rp_median=float(gc.bp_rp[v].median()),
+                               ebv_sfd_median=float(gc.ebv_sfd[v].median())) for k, v in grp.items()]
+        diag["clusters_dropped_ebv"] = sorted(set(gc.cluster[b & ~ok_ebv]) - set(gc.cluster[b & ok_ebv]))
+        diag["pm_sint_median"] = float(astro.pm_sint[b].median())
+        # contamination estimate: ext_r1 GC training stars (read from the ext catalogue) failing the tests
+        r1 = pd.read_parquet(EXT1 / "catalog.parquet", columns=["source_id", "source"])
+        r1 = r1.source_id[r1.source == "gc"]
+        i1 = gc.source_id.isin(r1).to_numpy()
+        diag["r1"] = dict(n=int(i1.sum()), frac_fail_ebv=float((~ok_ebv[i1]).mean()), frac_fail_pm=float((~ok_pm[i1]).mean()),
+                          frac_fail_plx=float((~ok_plx[i1]).mean()), frac_fail_any=float((~(ok_ebv & ok_pm & ok_plx)[i1]).mean()),
+                          frac_fail_pm_or_plx=float((~(ok_pm & ok_plx)[i1]).mean()),
+                          G_median=float(gc.G[i1].median()), bp_rp_median=float(gc.bp_rp[i1].median()),
+                          frac_G_gt_16=float((gc.G[i1] > 16).mean()), ebv_sfd_median=float(gc.ebv_sfd[i1].median()))
+        diag["r1_by_ebv_bin"] = [dict(bin=lab, n=int((i1 & m_).sum()), frac_fail_pm_or_plx=float((~(ok_pm & ok_plx))[i1 & m_].mean()) if (i1 & m_).any() else float("nan"))
+                                 for lab, m_ in (("E(B-V)<=0.5", ok_ebv), ("E(B-V)>0.5", ~ok_ebv))]
+        diag["thresholds"] = dict(ebv_max=GC2_EBV_MAX, pm_chi2=GC2_PM_CHI2, plx_nsig=GC2_PLX_NSIG, plx_sys=GC2_PLX_SYS, cap=GC2_CAP,
+                                  pm_sint_floor=GC2_PM_SINT_FLOOR, ebv_source="Harris 2010 (harris10_mwgc.dat)", plx_ref="BV21 distance (1/d_BV21), plx - zpt (Lindegren+21)")
+        cap = GC2_CAP
+    else:
+        cand_pool, cap = gc[base].copy(), GC_CAP
+    cand = cand_pool
     rng = np.random.default_rng(SEED)
-    cand = pd.concat([d.sample(min(len(d), GC_CAP), random_state=int(rng.integers(1 << 31))) for _, d in cand.groupby("cluster")])
+    cand = pd.concat([d.sample(min(len(d), cap), random_state=int(rng.integers(1 << 31))) for _, d in cand.groupby("cluster")])
+    if v2:
+        diag["steps"].append(dict(cut=f"+ cap {cap}/cluster (random)", n_stars=len(cand), n_clusters=int(cand.cluster.nunique())))
     role = np.where(gc.cluster.isin(held), "heldout", np.where(gc.source_id.isin(cand.source_id), "train", "excluded"))
     roles.append(pd.DataFrame({"source_id": gc.source_id, "component": "cluster_gc", "role": role, "cluster": gc.cluster}))
     cand["m_h"] = [gold.get(c, m) for c, m in zip(cand.cluster, cand.m_h)]
@@ -167,7 +292,7 @@ def select(meta: dict) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
     xs.append(xgc[gc.index.get_indexer(cand.index)])
     meta["gc"] = dict(n_clusters=len(clus), held_out_clusters=sorted(held, key=lambda c: clus[c]),
                       train_clusters=sorted([c for c in clus if c not in held], key=lambda c: clus[c]),
-                      n_pool=len(gc), n_quality=int(good.sum()), n_train=len(cand),
+                      n_pool=len(gc), n_quality=int(good.sum()), n_train=len(cand), cuts=(diag if v2 else None),
                       n_clusters_apogee_median_label=int(sum(c in gold for c in cand.cluster.unique())))
     del xgc
 
@@ -212,6 +337,13 @@ def fetch_astro(ids: np.ndarray, threads: int) -> pd.DataFrame:
             if k % 10 == 0:
                 log("  chunk", path.name)
     t = pd.concat([pd.read_parquet(p) for p in sorted(cdir.glob("*.parquet"))], ignore_index=True).drop_duplicates("source_id")
+    miss = np.setdiff1d(ids, t.source_id.to_numpy())             # chunk files are keyed by position: a copied cache can lack ids
+    if len(miss):
+        log(f"  {len(miss)} ids missing from the cached chunks: fetching")
+        extra = [(miss[s:s + bap.CHUNK], cdir / f"x{k:04d}.parquet") for k, s in enumerate(range(0, len(miss), bap.CHUNK))]
+        for i, pth in extra:
+            bap.fetch(i, pth)
+        t = pd.concat([t] + [pd.read_parquet(p) for _, p in extra], ignore_index=True).drop_duplicates("source_id")
     t = bap.derive(t)
     t["zpt"], t["zpt_method"] = bap.parallax_zero_point(t)
     t["ebv_sfd"] = bap.sfd_ebv(t, str(REPO / "data/dustmaps/sfd"))
@@ -222,15 +354,25 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--nproc", type=int, default=8)
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--variant", choices=["ext", "ext2"], default="ext",
+                    help="ext2: stricter GC training members (E(B-V), PM/parallax consistency, cap 100) -> data/processed/aspcap_v0.6.0_ext2; "
+                         "the held-out clusters / GALAH / VMP splits are identical; ood_split_ext2.parquet is written next to ood_split.parquet")
     args = ap.parse_args()
+    global EXT
     import build_xp_noise as bxn
     from aspgapv3.data.xp import NORM_INDEX, aspgap_scaler_arrays, build_design_matrix, coef_to_aspgap_input
     from aspgapv3.data.xpnoise import N_PACK, parse_h5_range
     import glob
 
+    v2 = args.variant == "ext2"
+    if v2:
+        EXT = EXT2
+        if not (EXT / "astrometry_chunks").exists():                 # reuse the already-downloaded Gaia chunks
+            EXT.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(EXT1 / "astrometry_chunks", EXT / "astrometry_chunks")
     EXT.mkdir(parents=True, exist_ok=True)
-    meta: dict = {"seed": SEED, "p_train": P_TRAIN, "healpix_nside": 2 ** NSIDE_LEVEL}
-    tab, X, split = select(meta)
+    meta: dict = {"seed": SEED, "p_train": P_TRAIN, "healpix_nside": 2 ** NSIDE_LEVEL, "variant": args.variant}
+    tab, X, split = select(meta, v2)
     log("selected", tab.source.value_counts().to_dict())
 
     # ---- Gaia / 2MASS / WISE
@@ -330,7 +472,13 @@ def main() -> None:
         shutil.copy(ROOT / f, EXT / f)
 
     # ---- split table + manifest
-    split.to_parquet(OODDIR / "ood_split.parquet", index=False)
+    if v2:
+        old = pd.read_parquet(OODDIR / "ood_split.parquet")
+        h = lambda d: set(map(tuple, d[d.role == "heldout"][["source_id", "component"]].to_numpy()))
+        assert h(old) == h(split), "held-out rows differ from ext_r1"
+        split.to_parquet(OODDIR / "ood_split_ext2.parquet", index=False)
+    else:
+        split.to_parquet(OODDIR / "ood_split.parquet", index=False)
     meta["n_ext_train_rows"] = int(n)
     meta["n_by_source"] = tab.source.value_counts().to_dict()
     meta["label_availability"] = {s: {l: int(mmat[(tab.source == s).to_numpy(), j].sum()) for j, l in enumerate(LABELS)}

@@ -133,7 +133,7 @@ def test_distance_head_outputs_nonneg_a0_and_fp32():
 def test_default_off_and_state_dict_identical_without_distance():
     for p in sorted(CFG.glob("*.yaml")):
         has = bool((load_config(p, []).get("model") or {}).get("distance", {}).get("enabled", False))
-        assert has == (p.stem in ("aspgap_dist", "aspgap_dist_ext")), p.stem
+        assert has == (p.stem in ("aspgap_dist", "aspgap_dist_ext", "aspgap_dist_ext2")), p.stem
     a = build_model(_cfg(False), n_atm=3, n_chem=3)
     assert not any("dist" in k or "colour" in k for k in a.state_dict())
     assert "mg" not in a(torch.rand(2, 343) + .5)

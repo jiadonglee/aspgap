@@ -1,0 +1,10 @@
+# aspgap_dist_ext with stricter globular-cluster training members (ext2 data root): clusters with Harris
+# E(B-V) > 0.5 dropped, per-star PM / parallax consistency with the cluster (VB21 mean PM, BV21 distance), at most
+# 100 members per cluster. Held-out clusters, GALAH and VMP splits are identical to aspgap_dist_ext. Nothing else changes.
+inherit: aspgap_dist_ext.yaml
+
+run:
+  name: aspgap_dist_ext2
+
+data:
+  root: data/processed/aspcap_v0.6.0_ext2

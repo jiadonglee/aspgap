@@ -98,3 +98,26 @@ def test_extended_root_integrity():
     for comp in ("galah", "cluster_gc", "lamost_vmp"):                    # a star is never train in its own component and held out in it
         s = sp[sp.component == comp]
         assert not set(s[s.role == "train"].source_id) & set(s[s.role == "heldout"].source_id)
+
+
+EXT2 = REPO / "data/processed/aspcap_v0.6.0_ext2"
+
+
+@pytest.mark.skipif(not (EXT2 / "catalog.parquet").exists(), reason="ext2 dataset not built")
+def test_ext2_same_holdout_fewer_gc():
+    c1 = pd.read_parquet(EXT / "catalog.parquet", columns=["source_id", "source"])
+    c2 = pd.read_parquet(EXT2 / "catalog.parquet", columns=["source_id", "source"])
+    for s in ("galah", "lamost_vmp"):                                   # identical GALAH / VMP training rows
+        assert set(c1.source_id[c1.source == s]) == set(c2.source_id[c2.source == s])
+    sp = pd.read_parquet(REPO / "data/processed/ood/ood_split_ext2.parquet")
+    old = pd.read_parquet(REPO / "data/processed/ood/ood_split.parquet")
+    h = lambda d: set(map(tuple, d[d.role == "heldout"][["source_id", "component"]].to_numpy()))
+    assert h(sp) == h(old)                                              # same held-out evaluation rows
+    g2 = c2.source_id[c2.source == "gc"]
+    assert 0 < len(g2) < (c1.source == "gc").sum()
+    assert not g2.isin(sp.source_id[(sp.role == "heldout") & (sp.component == "cluster_gc")]).any()
+
+
+def test_gc_consistency_helpers():
+    ebv = b.harris_ebv()
+    assert abs(ebv["ngc104"] - 0.04) < 1e-6 and ebv["ngc6553"] > 0.5
