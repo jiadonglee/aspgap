@@ -9,3 +9,6 @@ run:
 
 data:
   root: data/processed/aspcap_v0.6.0_ext
+
+train:
+  epochs: 100                # = the aspgap_dist_r3 run (aspgap_dist.yaml itself inherits 60)

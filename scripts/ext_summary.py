@@ -41,7 +41,7 @@ def two(a: pd.DataFrame, b: pd.DataFrame, keys: list[str], vals: list[str], na="
     for v in vals:
         m[f"d_{v}"] = m[f"{v}_{nb}"] - m[f"{v}_{na}"]
         cols += [f"{v}_{na}", f"{v}_{nb}", f"d_{v}"]
-    return m[cols]
+    return m[cols].dropna(subset=[c for c in cols if c not in keys], how="all")
 
 
 def read(run: str, f: str) -> pd.DataFrame:
