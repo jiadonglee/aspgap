@@ -1,0 +1,17 @@
+# aspgap_dist_ext2 + red-clump A0 anchors (src/aspgapv3/rc_anchor.py): APOGEE RC stars of the training split
+# (Bovy+14-like Teff-logg-[M/H] window), M_G^RC([M/H], Teff) self-calibrated on low-extinction RC with the model's
+# own convention (K_G = 0.789, Lindegren zero-point), anchor A0 = (G - M_G^RC - mu_plx) / 0.789 for RC stars with
+# parallax S/N > 5 at ANY extinction.  Existing nearby / high-latitude anchors unchanged; RC anchors have their own
+# mean in the loss (weight 1.0).  Same data root, seed, 100 epochs as aspgap_dist_ext2.
+inherit: aspgap_dist_ext2.yaml
+
+run:
+  name: aspgap_dist_ext2_rc
+
+model:
+  distance:
+    rc_anchor:
+      enabled: true
+      snr_min: 5.0
+      sig_mu_floor: 0.1
+      weight: 1.0

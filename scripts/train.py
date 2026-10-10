@@ -188,12 +188,15 @@ def main() -> None:
     w_plx, w_phot = (float(dist_cfg.get("weight_plx", 1.0)), float(dist_cfg.get("weight_phot", 1.0))) \
         if use_dist else (0.0, 0.0)
     w_anc = float(dist_cfg.get("weight_anchor", 0.0)) if use_dist else 0.0
+    rc_cfg = dist_cfg.get("rc_anchor") or {}                # red-clump A0 anchors (rc_anchor.py); absent => off
+    use_rc = use_dist and bool(rc_cfg.get("enabled", False))
+    w_rc = float(rc_cfg.get("weight", w_anc)) if use_rc else 0.0
     dist_w = {"w_plx": w_plx, "w_phot": w_phot} if use_dist else None
     label_names = list(cfg["labels"]["atm"]) + list(cfg["labels"].get("chem") or [])
     dsets = {s: APOGEEDataset(root, split=s, input=inp, noise=need_noise, labels=label_names, astro=use_dist,
                               require_xp_valid=req_valid, aux=aux_names,
                               aux_ref=str(cfg["labels"].get("aux_ref", "h")),
-                              latent=lat_src) for s in
+                              latent=lat_src, rc_anchor=rc_cfg if use_rc else None) for s in
              ("train", "val", "iid_test", "sky_test")}
     n_labels = len(dsets["train"].labels)
     n_atm = len(cfg["labels"]["atm"])
@@ -266,7 +269,8 @@ def main() -> None:
         net.colour_net.set_output_bias((ar["col"] * cw).sum(0) / np.maximum(cw.sum(0), 1))
         log({"event": "distance_init", "mg_mean": float(np.median(mg_obs)), "mg_std": float(mg_obs.std()),
              "n_mg": int(zc.sum()), "n_anchor_nearby": int((dset.anchor_set == 1).sum()),
-             "n_anchor_highlat": int((dset.anchor_set == 2).sum()), "weight_anchor": w_anc, "plx_ok": float(ar["plx_ok"].mean()),
+             "n_anchor_highlat": int((dset.anchor_set == 2).sum()), "n_anchor_rc": int((dset.anchor_set == 3).sum()),
+             "rc_calib": dset.rc_calib, "weight_anchor_rc": w_rc, "weight_anchor": w_anc, "plx_ok": float(ar["plx_ok"].mean()),
              "col_ok_frac": [round(float(v), 3) for v in ar["col_ok"].mean(0)],
              "weight_plx": w_plx, "weight_phot": w_phot})
     augmenter = None
@@ -386,7 +390,7 @@ def main() -> None:
                                   l_lat=l_lat, weight_lat=w_lat)
             if use_dist:          # astro columns are the ORIGINAL star's (augmentation never touches them)
                 dl = distance_losses(net, out, batch, device)
-                loss = loss + w_plx * dl["plx"] + w_phot * dl["phot"] + w_anc * dl["anchor"]
+                loss = loss + w_plx * dl["plx"] + w_phot * dl["phot"] + w_anc * dl["anchor"] + w_rc * dl["anchor_rc"]
             if not torch.isfinite(loss):
                 n_nonfinite += 1
                 continue

@@ -34,6 +34,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from ..rc_anchor import RC_SET, calibrate_rc, rc_anchor_targets
+
 
 # ---------------------------------------------------------------- catalog IO
 
@@ -119,7 +121,8 @@ class APOGEEDataset(Dataset):
                  input: str = "xp343", labels: list[str] | None = None,
                  noise: bool = False, require_xp_valid: bool = False,
                  aux: list[str] | None = None, aux_ref: str = "h",
-                 latent: str | None = None, astro: bool = False):
+                 latent: str | None = None, astro: bool = False,
+                 rc_anchor: dict | None = None):
         if aux_ref not in ("h", "fe"):
             raise ValueError(f"labels.aux_ref must be h|fe, got {aux_ref!r}")
         self.aux_ref = aux_ref
@@ -201,6 +204,8 @@ class APOGEEDataset(Dataset):
 
         # Gaia parallax + 2MASS/WISE colours (astrometry_phot.parquet, build_astrometry_phot.py)
         self.astro = bool(astro)
+        self.rc_cfg = dict(rc_anchor) if rc_anchor else None      # red-clump A0 anchors (rc_anchor.py); None = off
+        self.rc_calib = None
         if self.astro:
             self._load_astro(cat)
 
@@ -256,6 +261,8 @@ class APOGEEDataset(Dataset):
         full_sid = full_cat.sort_values("row")["source_id"].to_numpy().astype(np.int64)
         if len(t) != len(full_sid) or not np.array_equal(t["source_id"].to_numpy(np.int64), full_sid):
             raise ValueError(f"{f} is not aligned with catalog row order (source_id mismatch)")
+        if self.rc_cfg:
+            self.rc_calib, rc_all = self._rc_anchor_all(full_cat, t)       # needs the FULL catalogue (train calibration)
         t = t.iloc[self.indices].reset_index(drop=True)
         self.astro_table = t                           # l, b, ra, dec, raw photometry for evaluation
         g = t["phot_g_mean_mag"].to_numpy(np.float64)       # Gaia G of the original star
@@ -283,8 +290,16 @@ class APOGEEDataset(Dataset):
         tgt, asig, aset = anchor_targets(plx - zp, e, t["b"].to_numpy(float), ebv)
         aset = np.where(ok & (self.split == "train"), aset, 0).astype(np.int8)
         self.anchor_set = aset
+        rc_ok = np.zeros(len(t), bool)
+        if self.rc_cfg:
+            # red-clump anchors: train split only, never on a star that is already a nearby / high-lat anchor
+            rt, rs, rk = (v[self.indices] for v in rc_all)
+            rc_ok = rk & ok & (self.split == "train") & (aset == 0)
+            self.anchor_set = np.where(rc_ok, RC_SET, aset).astype(np.int8)
+            tgt, asig = np.where(rc_ok, rt, tgt), np.where(rc_ok, rs, asig)
         self.astro_arr = {
             "anc_t": tgt.astype(np.float32), "anc_s": asig.astype(np.float32), "anc_ok": aset > 0,
+            "rc_ok": rc_ok,
             "g": g.astype(np.float32), "plx": np.nan_to_num(plx).astype(np.float32),
             "plx_err": np.where(ok, e, 1.0).astype(np.float32), "zp": zp.astype(np.float32),
             "plx_ok": ok, "col": np.nan_to_num(col).astype(np.float32),
@@ -292,6 +307,35 @@ class APOGEEDataset(Dataset):
             "mag": np.nan_to_num(np.stack([mag[b] for b in BANDS], 1)).astype(np.float32),
             "mag_ok": np.stack([good[b] for b in BANDS], 1),
         }
+
+    def _rc_anchor_all(self, full_cat: pd.DataFrame, t: pd.DataFrame):
+        """RC calibration on the TRAIN APOGEE stars of the whole catalogue and RC anchor (target, sigma, ok)
+        for every catalogue row.  Uses the stored raw teff / logg / [M/H] labels."""
+        from ..models.distance import PLX_ZP_FALLBACK
+        cfg = self.rc_cfg
+        sc = LabelScaler.load(self.root)
+        z = np.load(self.root / "labels.npz")
+        lab = {n: np.where(z["mask"][:, i], z["y"][:, i], np.nan) for i, n in enumerate(sc.labels)}
+        fc = full_cat.sort_values("row").reset_index(drop=True)
+        plx, e = t["parallax"].to_numpy(float), t["parallax_error"].to_numpy(float)
+        zp = t["zpt"].to_numpy(float) if "zpt" in t else np.full(len(t), PLX_ZP_FALLBACK)
+        zp = np.where(np.isfinite(zp), zp, PLX_ZP_FALLBACK)
+        g = t["phot_g_mean_mag"].to_numpy(float)
+        ebv = t["ebv_sfd"].to_numpy(float) if "ebv_sfd" in t else np.full(len(t), np.nan)
+        ruwe = t["ruwe"].to_numpy(float) if "ruwe" in t else np.zeros(len(t))
+        base = ((fc["split"] == "train") & (fc["source"] == "apogee")).to_numpy() if "source" in fc \
+            else (fc["split"] == "train").to_numpy()
+        with np.errstate(invalid="ignore"):
+            good = np.isfinite(e) & (e > 0) & np.isfinite(plx)
+        sub = base & good
+        calib = calibrate_rc(g[sub], (plx - zp)[sub], e[sub], lab["m_h"][sub], lab["teff"][sub], lab["logg"][sub],
+                             ebv[sub], ruwe[sub])
+        out = rc_anchor_targets(g, plx - zp, np.where(good, e, np.nan), lab["m_h"], lab["teff"], lab["logg"], calib,
+                                snr_min=float(cfg.get("snr_min", 5.0)),
+                                sig_mu_floor=float(cfg.get("sig_mu_floor", 0.1)))
+        # anchors only from APOGEE-labelled rows (external GALAH / GC / VMP labels are never used for the RC window)
+        ok = out[2] & (fc["source"] == "apogee").to_numpy() if "source" in fc else out[2]
+        return calib, (out[0], out[1], ok)
 
     def _load_latent(self, full_cat: pd.DataFrame, source: str) -> None:
         if source != "v1_latent":

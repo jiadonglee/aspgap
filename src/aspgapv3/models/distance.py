@@ -151,7 +151,10 @@ def distance_losses(net, out: dict, batch: dict, device, clamp=(-8.0, 8.0)) -> d
                         col_int, out["a0"], net.colour_net.log_sigma_int)
     l_anc = anchor_nll(out["a0"], a["anc_t"].to(device), a["anc_s"].to(device), a["anc_ok"].to(device)) \
         if "anc_ok" in a else torch.zeros((), device=device)
-    return {"plx": l_plx, "phot": l_phot, "pull": pull, "anchor": l_anc}
+    # red-clump anchors (rc_anchor.py) get their own mean so the nearby / high-latitude anchors keep their weight
+    l_rc = anchor_nll(out["a0"], a["anc_t"].to(device), a["anc_s"].to(device), a["rc_ok"].to(device)) \
+        if "rc_ok" in a else torch.zeros((), device=device)
+    return {"plx": l_plx, "phot": l_phot, "pull": pull, "anchor": l_anc, "anchor_rc": l_rc}
 
 
 # ---------------------------------------------------------------- A0 anchor
