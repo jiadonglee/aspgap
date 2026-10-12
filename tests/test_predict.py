@@ -68,8 +68,9 @@ def test_shape_error(model):
 
 
 def test_inference_import_is_light():
-    import subprocess, sys
+    import os, subprocess, sys
     code = ("import sys, aspgapv3.predict; "
             "bad=[m for m in ('yaml','aspgapv3.data','astropy','sklearn','joblib') if m in sys.modules]; "
             "sys.exit(len(bad))")
-    assert subprocess.run([sys.executable, "-c", code]).returncode == 0
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    assert subprocess.run([sys.executable, "-c", code], env=env).returncode == 0

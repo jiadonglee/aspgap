@@ -1,4 +1,5 @@
 """require_xp_valid dataset filtering and the coef110n forward transform."""
+import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -52,7 +53,8 @@ def test_require_xp_valid_needs_file(tmp_path):
 
 
 @pytest.mark.skipif(not (REAL / "coef110n.npy").is_file()
-                    or not Path("../aspgap/model/scaler_bp_gmagand_0330.gz").is_file(),
+                    or not Path("../aspgap/model/scaler_bp_gmagand_0330.gz").is_file()
+                    or importlib.util.find_spec("joblib") is None,
                     reason="real test dataset / scalers unavailable")
 def test_forward_transform_reproduces_coef110n():
     import shutil, tempfile
