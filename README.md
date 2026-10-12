@@ -45,11 +45,12 @@ python scripts/predict.py --source-ids 4295806720,4295806336 --output out.csv
 and can be slow (about a minute for a few stars, longer for many); stars without a published XP spectrum
 get NaN rows. For large samples, download the coefficients yourself and use `--input`.
 
-Output columns (APOGEE/ASPCAP scale; `*_err` are 1-sigma predicted uncertainties):
+Output columns (APOGEE/ASPCAP scale; `*_err` are 1-sigma predicted uncertainties, they do not include the ASPCAP label error):
 
 | columns | meaning |
 |---|---|
-| `teff`, `logg`, `m_h`, `alpha_m` (+ `_err`) | Teff [K], log g [dex], [M/H], [alpha/M] |
+| `teff`, `logg`, `m_h`, `alpha_m` (+ `_err`) | Teff [K], log g [dex], [M/H], [alpha/M]; `_err` = 1-sigma total predicted uncertainty `sqrt(sigma_model^2 + floor^2)` |
+| `teff_err_model`, `logg_err_model`, `m_h_err_model`, `alpha_m_err_model` | raw network sigma, i.e. the excess over the training sigma floor (Teff 50 K, logg 0.05, [M/H] 0.02, [alpha/M] 0.02); it saturates at 13.7 K (Teff) / 0.0017 ([alpha/M]) for 36% / 15% of stars, so do not use it as the uncertainty |
 | `mg`, `mg_err` | intrinsic absolute G magnitude and its uncertainty |
 | `a0` | extinction at 550 nm [mag] (no uncertainty is predicted) |
 | `dist_mod`, `dist_mod_err` | `G - M_G - 0.789 A0` and `mg_err` (A0 error not included) |
@@ -62,7 +63,12 @@ Quality flags (booleans; thresholds are stored in the weights file):
 | `flag_bad_input` | non-finite coefficients or G |
 | `flag_g_outside` | G > 17.65, fainter than the training / augmentation limit |
 | `flag_teff_edge` | predicted Teff > 7500 K (training labels stop at 8000 K) or `flag_high_sigma_teff` |
-| `flag_high_sigma_{teff,logg,m_h,alpha_m,mg}` | predicted sigma above the 95th percentile on the APOGEE iid test set: Teff 182 K, logg 0.357, [M/H] 0.194, [alpha/M] 0.075, M_G 1.12 mag |
+| `flag_high_sigma_{teff,logg,m_h,alpha_m,mg}` | total `_err` above the 95th percentile on the APOGEE iid test set: Teff 189 K, logg 0.360, [M/H] 0.195, [alpha/M] 0.078, M_G 1.12 mag |
+
+Calibration (APOGEE iid_test, 26k stars): robust std (1.4826 MAD) of (pred - ASPCAP) / sqrt(err^2 + e_ASPCAP^2) with the
+total `err` is Teff 0.71, logg 0.88, [M/H] 0.89, [alpha/M] 0.71 (std 0.85 / 0.98 / 0.96 / 0.91), i.e. the errors are
+slightly conservative for Teff and [alpha/M]; with the network-only sigma they would be 1.46 / 1.02 / 0.96 / 0.98.
+No rescaling is applied.
 
 Validity domain: FGKM stars with 3000 K < Teff < 8000 K, G <= 17.65, [M/H] > -4 (labels: APOGEE, GALAH DR4, globular
 clusters, LAMOST VMP). Hot stars are predicted too cool, faint / extinguished stars get too-large distances, and A0 is

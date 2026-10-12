@@ -21,7 +21,8 @@ from .models.net import XPChemNet, build_model
 
 DEFAULT_WEIGHTS_NAME = "aspgap_v3_ext_r2.pt"
 OUTPUT_COLUMNS = ["teff", "teff_err", "logg", "logg_err", "m_h", "m_h_err", "alpha_m", "alpha_m_err",
-                  "mg", "mg_err", "a0", "dist_mod", "dist_mod_err", "distance_pc"]
+                  "mg", "mg_err", "a0", "dist_mod", "dist_mod_err", "distance_pc",
+                  "teff_err_model", "logg_err_model", "m_h_err_model", "alpha_m_err_model"]
 FLAG_COLUMNS = ["flag_bad_input", "flag_g_outside", "flag_teff_edge", "flag_high_sigma_teff",
                 "flag_high_sigma_logg", "flag_high_sigma_m_h", "flag_high_sigma_alpha_m", "flag_high_sigma_mg"]
 
@@ -55,6 +56,7 @@ class AspGapModel:
         self.scale = np.asarray(inp["scale"], np.float64)
         self.lab_mean = np.asarray(bundle["label_norm"]["mean"], np.float64)
         self.lab_std = np.asarray(bundle["label_norm"]["std"], np.float64)
+        self.floor = np.array([bundle["label_floor"][n] for n in bundle["labels"]], np.float64)
         self.clamp = tuple(bundle["logvar_clamp"])
         self.k_g = float(bundle["distance"]["k_g"])
         self.domain = bundle["domain"]
@@ -116,7 +118,10 @@ def predict(bp_coefficients, rp_coefficients, phot_g_mean_mag, batch_size: int =
     device : "cpu", "cuda" or None (= cuda if available).  model / weights : preloaded model or weights path.
 
     Returns a DataFrame (index 0..N-1, same order) with OUTPUT_COLUMNS + FLAG_COLUMNS; *_err are 1-sigma
-    predicted uncertainties (dist_mod_err = mg_err; A0 uncertainty is not included).
+    predicted uncertainties.  Label *_err = sqrt(sigma_model^2 + floor^2) with the per-label training sigma floors
+    (Teff 50 K, logg 0.05, [M/H] 0.02, [alpha/M] 0.02); *_err_model is the raw network sigma (excess over the
+    floor).  mg_err is the network sigma (no floor in the distance loss); dist_mod_err = mg_err, A0 uncertainty
+    is not included.
     """
     if model is None:
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -149,7 +154,8 @@ def predict(bp_coefficients, rp_coefficients, phot_g_mean_mag, batch_size: int =
 
     lo, hi = model.clamp
     phys = mu * model.lab_std + model.lab_mean
-    err = np.exp(0.5 * np.clip(lv, lo, hi)) * model.lab_std
+    err_model = np.exp(0.5 * np.clip(lv, lo, hi)) * model.lab_std     # excess over the training sigma floor
+    err = np.hypot(err_model, model.floor)                           # total: sqrt(model^2 + floor^2)
     mg_err = np.exp(0.5 * np.clip(lv_mg, lo, hi))
     dist_mod = g - mg - model.k_g * a0
 
@@ -157,7 +163,9 @@ def predict(bp_coefficients, rp_coefficients, phot_g_mean_mag, batch_size: int =
         "teff": phys[:, 0], "teff_err": err[:, 0], "logg": phys[:, 1], "logg_err": err[:, 1],
         "m_h": phys[:, 2], "m_h_err": err[:, 2], "alpha_m": phys[:, 3], "alpha_m_err": err[:, 3],
         "mg": mg, "mg_err": mg_err, "a0": a0, "dist_mod": dist_mod, "dist_mod_err": mg_err,
-        "distance_pc": 10.0 ** (dist_mod / 5.0 + 1.0)})
+        "distance_pc": 10.0 ** (dist_mod / 5.0 + 1.0),
+        "teff_err_model": err_model[:, 0], "logg_err_model": err_model[:, 1],
+        "m_h_err_model": err_model[:, 2], "alpha_m_err_model": err_model[:, 3]})
     df.loc[~good, :] = np.nan
 
     th, dom = model.thresholds, model.domain

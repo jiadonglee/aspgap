@@ -26,6 +26,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default="runs/aspgap_dist_ext_r2")
     ap.add_argument("--out", default="weights/aspgap_v3_ext_r2.pt")
+    ap.add_argument("--source-commit", default=None, help="commit the run was trained at (default: HEAD)")
     ap.add_argument("--sigma-quantile", type=float, default=0.95)
     args = ap.parse_args()
     run = Path(args.run)
@@ -60,10 +61,12 @@ def main() -> None:
     # sigma thresholds: quantile of predicted sigma on the APOGEE iid_test set
     p = np.load(run / "predictions_iid_test.npz")
     pd_ = np.load(run / "predictions_dist_iid_test.npz")
-    sig = {n: float(np.quantile(p["sigma"][:, k], args.sigma_quantile))
-           for k, n in enumerate(LABELS)}   # predictions npz already holds raw-unit sigma
+    floors = {n: float(cfg["labels"]["sigma_floor"][n]) for n in LABELS}   # raw units, added in quadrature in training
+    # thresholds on the TOTAL reported uncertainty sqrt(sigma_model^2 + floor^2)
+    sig = {n: float(np.quantile(np.hypot(p["sigma"][:, k], floors[n]), args.sigma_quantile))
+           for k, n in enumerate(LABELS)}   # predictions npz holds raw-unit model sigma
     sig["mg"] = float(np.quantile(np.exp(0.5 * np.clip(pd_["logvar_mg"], -8, 8)), args.sigma_quantile))
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    commit = args.source_commit or subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
 
     out = {
         "format_version": 1,
@@ -81,12 +84,13 @@ def main() -> None:
         "label_units": {"teff": "K", "logg": "dex (cgs)", "m_h": "dex", "alpha_m": "dex", "mg": "mag", "a0": "mag"},
         "label_norm": {"mean": torch.tensor(norm["mean"][idx], dtype=torch.float64),
                        "std": torch.tensor(norm["std"][idx], dtype=torch.float64)},
+        "label_floor": floors,   # err_total = sqrt(sigma_model^2 + floor^2)
         "logvar_clamp": [float(v) for v in cfg["train"]["logvar_clamp"]],
         "distance": {"k_g": EXT_K["G"], "mg_mean": float(ck["state_dict"]["head_dist.mg_mean"]),
                      "mg_scale": float(ck["state_dict"]["head_dist.mg_scale"]),
                      "formula": "dist_mod = G - M_G - k_g*A0; distance_pc = 10**(dist_mod/5 + 1)"},
         "domain": domain,
-        "sigma_thresholds": {"quantile": args.sigma_quantile, "reference": "APOGEE iid_test", **sig},
+        "sigma_thresholds": {"quantile": args.sigma_quantile, "reference": "APOGEE iid_test, total err", **sig},
     }
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, args.out)
