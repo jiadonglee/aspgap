@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-"""Evaluate trained runs (and AspGap v1) on the OOD test sets built by scripts/build_ood.py.
+"""Evaluate trained runs on the OOD test sets built by scripts/build_ood.py.
 
-    python scripts/eval_ood.py --run aspgap_dist_r3 aspgap110_aug_rand_r2 v1 [--summary-only]
+    python scripts/eval_ood.py --run aspgap_dist_ext_r2 [--holdout] [--summary-only]
 
 Per run  -> <runs>/<run>/ood/{metrics_components,metrics_binned,metrics_clusters,metrics_distance,metrics_auc,
-                              metrics_id}.csv, pred_<component>.parquet, report.md        (v1 -> runs/aspgap_v1_ref/ood)
+                              metrics_id}.csv, pred_<component>.parquet, report.md
 Summary  -> runs/ood_summary/report.md  (all runs given, side by side)
+--holdout: only the OOD stars NOT used for training (ood_split.parquet from build_ext_dataset.py) -> <run>/ood_holdout,
+           runs/ood_summary_holdout.  --out-dir redirects all outputs (scratch checks); run names still resolve under runs/.
 
 Errors are model - external label.  Label-scale offsets between the external survey and APOGEE are only partly
 removed (GALAH, GC [M/H]); LAMOST labels are NOT put on the APOGEE scale.  `survey offset` and `model error`
@@ -14,7 +16,7 @@ cannot be separated for the hot / VMP components -> read those as "where does th
 OOD score = mean distance (train-label-std units) of the TRUE (Teff, logg, [M/H]) to its 8 nearest APOGEE-train
 stars (build_ood.py `ood_knn`); bins are quantiles of the same score for APOGEE iid_test stars.
 Flags (AUC for |err| > 3 x in-distribution MAD): predicted sigma, input Mahalanobis distance to the train
-coef110n distribution, kNN distance of the trunk embedding z (v1: its 1024-d latent) to train stars.
+coef110n distribution, kNN distance of the trunk embedding z to train stars.
 """
 from __future__ import annotations
 
@@ -40,9 +42,9 @@ COMPS = ["galah", "cluster_oc", "cluster_gc", "lamost_hot", "lamost_vmp", "starh
 LABELS = ["teff", "logg", "m_h", "alpha_m"]
 SKIP = {("cluster_gc", "alpha_m")}                  # nominal GC alpha: only its spread is meaningful
 EXT_G = 0.789
-V1_DIR = "aspgap_v1_ref"
 HOLDOUT = False                                      # --holdout: only the OOD stars NOT used for training the ext model
 OUTSUB, SUMDIR = "ood", "ood_summary"
+OUT_ROOT = RUNS                                       # where outputs are written (--out-dir)
 HELD_COMPS = ("galah", "cluster_gc", "lamost_vmp")   # components split into train / held-out parts (build_ext_dataset.py)
 
 
@@ -88,12 +90,11 @@ class NetPredictor:
         from aspgapv3.models.net import build_model
         ck = torch.load(run / "ckpt_best.pt", map_location=device, weights_only=False)
         cfg = ck["config"]
-        assert cfg["data"].get("input", "xp343") == "coef110n", "OOD sets provide the coef110n input only"
+        assert cfg["data"].get("input", "coef110n") == "coef110n", "OOD sets provide the coef110n input only"
         self.labels, n_atm = ck["labels"], ck["n_atm"]
-        self.net = build_model(cfg, n_atm=n_atm, n_chem=len(self.labels) - n_atm, n_aux=int(ck.get("n_aux", 0))).to(device)
+        self.net = build_model(cfg, n_atm=n_atm, n_chem=len(self.labels) - n_atm).to(device)
         self.net.load_state_dict(ck["state_dict"])
         self.net.eval()
-        assert self.net.side is None, "side-conditioned nets are not supported here"
         self.root = REPO / cfg["data"]["root"] if (REPO / cfg["data"]["root"]).is_dir() else ROOT
         sc = LabelScaler.load(self.root)
         sel = [sc.labels.index(n) for n in self.labels]
@@ -105,7 +106,7 @@ class NetPredictor:
     def __call__(self, x: np.ndarray, batch: int = 8192) -> dict:
         mus, sgs, zs, dd = [], [], [], {"mg": [], "logvar_mg": [], "a0": []}
         for i in range(0, len(x), batch):
-            out = self.net(torch.from_numpy(x[i:i + batch]).to(self.device), None)
+            out = self.net(torch.from_numpy(x[i:i + batch]).to(self.device))
             mus.append(torch.cat([out["mu_atm"], out["mu_chem"]], 1).float().cpu().numpy())
             lv = torch.cat([out["logvar_atm"], out["logvar_chem"]], 1).float().clamp(-8, 8)
             sgs.append(lv.exp().sqrt().cpu().numpy())
@@ -129,24 +130,6 @@ class NetPredictor:
         return o
 
 
-class V1Predictor:
-    def __init__(self, device: str):
-        import eval_v1_reference as ev
-        self.m, self.device, self.has_dist, self.name = ev.V1Model(device), device, False, "v1"
-
-    @torch.no_grad()
-    def __call__(self, x: np.ndarray, batch: int = 8192) -> dict:
-        mus, sgs, zs = [], [], []
-        for i in range(0, len(x), batch):
-            xb = torch.from_numpy(x[i:i + batch]).to(self.device)   # coef110n == v1's production input
-            z = self.m.enc(xb)
-            out = self.m.dec(z).cpu().numpy()
-            mus.append(self.m.sc_lab.inverse_transform(out[:, :4]))
-            sgs.append(np.abs(out[:, 4:] * self.m.sc_lab.scale_))
-            zs.append(z.cpu().numpy())
-        return {"mu": np.concatenate(mus), "sigma": np.concatenate(sgs), "z": np.concatenate(zs)}
-
-
 def read_comp(name: str):
     t = pq.read_table(OODDIR / f"ood_{name}.parquet")
     x = np.asarray(t.column("x").combine_chunks().values, dtype=np.float32).reshape(-1, 110)
@@ -164,10 +147,9 @@ def read_comp(name: str):
 # ------------------------------------------------------------------ one run
 def evaluate_run(arg: str, device: str) -> Path:
     from aspgapv3.ood import LatentKnnOOD
-    is_v1 = arg == "v1"
-    out = RUNS / (V1_DIR if is_v1 else Path(arg).name) / OUTSUB
+    out = OUT_ROOT / Path(arg).name / OUTSUB
     out.mkdir(parents=True, exist_ok=True)
-    pred = V1Predictor(device) if is_v1 else NetPredictor(Path(arg) if Path(arg).is_dir() else RUNS / arg, device)
+    pred = NetPredictor(Path(arg) if Path(arg).is_dir() else RUNS / arg, device)
     meta = json.loads((OODDIR / "ood_meta.json").read_text())
     qs = meta["ood_knn_id_quantiles"]
     knn_edges = [0.0, qs["0.5"], qs["0.9"], qs["0.99"], qs["0.999"], np.inf]
@@ -365,9 +347,9 @@ def write_run_report(out: Path, name: str, meta: dict) -> None:
 
 # ------------------------------------------------------------------ summary
 def write_summary(runs: list[str]) -> None:
-    dirs = {("v1" if a == "v1" else Path(a).name): RUNS / (V1_DIR if a == "v1" else Path(a).name) / OUTSUB for a in runs}
+    dirs = {Path(a).name: OUT_ROOT / Path(a).name / OUTSUB for a in runs}
     meta = json.loads((OODDIR / "ood_meta.json").read_text())
-    fnd = RUNS / SUMDIR / "findings.md"
+    fnd = OUT_ROOT / SUMDIR / "findings.md"
     S = [fnd.read_text() if fnd.exists() else "", "# OOD summary\n", f"Models: {', '.join(dirs)}.  Error = model - external label.\n",
          "## Test-set sizes (after removing APOGEE-catalogue stars, with XP and G<17.65)\n",
          md(pd.DataFrame([dict(component=k, **v) for k, v in meta["counts"].items()]) if not HOLDOUT else
@@ -431,20 +413,23 @@ def write_summary(runs: list[str]) -> None:
     S += ["## OOD-flag AUC: |err| > 3 x ID MAD vs flag\n"]
     S += [md(pivot("auc", ["component", "label", "flag"], ["auc"]), ".3f")]
     S += ["## Flag AUC: component vs APOGEE iid_test stars\n", md(pivot("auc_vs_apogee_test", ["component", "flag"], ["auc_vs_apogee_test"]), ".3f")]
-    od = RUNS / SUMDIR
-    od.mkdir(exist_ok=True)
+    od = OUT_ROOT / SUMDIR
+    od.mkdir(parents=True, exist_ok=True)
     (od / "report.md").write_text("\n".join(S))
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run", nargs="+", required=True, help="run dir/name (relative names resolve under runs/); 'v1' = AspGap v1")
+    ap.add_argument("--run", nargs="+", required=True, help="run dir/name (relative names resolve under runs/)")
     ap.add_argument("--summary-only", action="store_true")
     ap.add_argument("--holdout", action="store_true",
                     help="evaluate only the held-out OOD stars (ood_split.parquet, written by build_ext_dataset.py): outputs "
                          "<run>/ood_holdout and runs/ood_summary_holdout")
+    ap.add_argument("--out-dir", default=None, help="write all outputs below this directory instead of runs/")
     args = ap.parse_args()
-    global HOLDOUT, OUTSUB, SUMDIR
+    global HOLDOUT, OUTSUB, SUMDIR, OUT_ROOT
+    if args.out_dir:
+        OUT_ROOT = Path(args.out_dir)
     if args.holdout:
         HOLDOUT, OUTSUB, SUMDIR = True, "ood_holdout", "ood_summary_holdout"
     dev = "cuda" if torch.cuda.is_available() else "cpu"

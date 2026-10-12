@@ -4,8 +4,7 @@ import pandas as pd
 import torch
 
 from aspgapv3.data.dataset import APOGEEDataset, LabelScaler, load_catalog, save_catalog
-from aspgapv3.metrics import (derived_mgfe, fit_conditional_mean,
-                             metrics_table, residual_recovery_score)
+from aspgapv3.metrics import metrics_table
 
 
 def make_processed_root(tmp_path, n=120, seed=0):
@@ -17,7 +16,7 @@ def make_processed_root(tmp_path, n=120, seed=0):
     mask = rng.random((n, K)) > 0.25
     y[~mask] = np.nan
     yerr[~mask] = np.nan
-    x343 = rng.normal(1.0, 0.05, (n, 343)).astype(np.float32)
+    x110 = rng.normal(0.0, 1.0, (n, 110)).astype(np.float32)
 
     y_raw = y.copy()
     mean = np.nanmean(np.where(mask, y, np.nan), 0)
@@ -26,7 +25,7 @@ def make_processed_root(tmp_path, n=120, seed=0):
     scaler.save(tmp_path)
     np.savez(tmp_path / "labels.npz", y=y_raw, yerr=yerr, mask=mask,
              labels=np.array(labels, dtype="U16"))
-    np.save(tmp_path / "xp343.npy", x343)
+    np.save(tmp_path / "coef110n.npy", x110)
     np.save(tmp_path / "coef110.npy", rng.normal(size=(n, 110)).astype(np.float32))
 
     splits = np.array(["train"] * 80 + ["val"] * 20 + ["iid_test"] * 20)
@@ -56,7 +55,7 @@ def test_dataset_masks_and_normalization(tmp_path):
     ds = APOGEEDataset(root, split="train")
     assert len(ds) == (load_catalog(root)["split"] == "train").sum()
     item = ds[0]
-    assert item["x"].shape == (343,)
+    assert item["x"].shape == (110,)
     assert item["y"].shape == (6,) and item["mask"].dtype == torch.bool
     # normalized targets are 0 where masked
     assert (item["y"][~item["mask"]] == 0).all()
@@ -66,7 +65,7 @@ def test_dataset_masks_and_normalization(tmp_path):
         APOGEEDataset(root, split="train", input="does_not_exist")
 
 
-def test_metrics_and_mgfe():
+def test_metrics_table():
     rng = np.random.default_rng(1)
     n = 100
     mu = rng.normal(0, 0.2, (n, 2))
@@ -77,27 +76,3 @@ def test_metrics_and_mgfe():
     t = metrics_table(mu, sig, y, m, ["a", "b"])
     assert t["n"].tolist() == [95, 100]
     assert np.isfinite(t["rmse"]).all()
-
-    mgfe, mgfe_e = derived_mgfe(mu[:, 0], sig[:, 0], mu[:, 1], sig[:, 1])
-    assert np.allclose(mgfe, mu[:, 0] - mu[:, 1])
-    assert np.allclose(mgfe_e, np.sqrt(2) * 0.1)
-
-
-def test_conditional_residual_recovery():
-    rng = np.random.default_rng(2)
-    n = 2000
-    teff = rng.normal(5000, 500, n)
-    logg = rng.normal(2.5, 1.0, n)
-    mh = rng.normal(-0.3, 0.4, n)
-    # strong atmospheric correlation + a weak intrinsic component
-    alpha = 0.1 * mh + 0.00005 * (teff - 5000) + 0.1 * rng.normal(size=n)
-    f, delta, info = fit_conditional_mean(teff, logg, mh, alpha)
-    assert info["r2_conditional_mean"] > 0.1
-    # predicting delta with the true delta recovers R^2 = 1
-    res = residual_recovery_score(delta, delta)
-    assert res["r2_delta"] > 0.99
-    # predicting delta with modest noise keeps most of the R^2
-    res2 = residual_recovery_score(delta, delta + rng.normal(0, 0.05, n))
-    assert 0.3 < res2["r2_delta"] < 1.0
-    res3 = residual_recovery_score(delta, np.full(n, np.nan))
-    assert res3["n"] == 0

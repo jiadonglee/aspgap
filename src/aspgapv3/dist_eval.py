@@ -6,7 +6,6 @@ errors, zero-point, ok masks, magnitudes), `tab` APOGEEDataset.astro_table (l, b
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import numpy as np
 import pandas as pd

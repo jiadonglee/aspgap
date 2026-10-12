@@ -11,7 +11,6 @@ G' >= G, then
     s     = 10^(-0.4 (G' - G))                       flux dimming factor
     c'    = s c + L_d z,   z ~ N(0, I)               L_d: donor Cholesky (abs units)
     sigma'^2 = s^2 sigma_own^2 + sigma_d^2           per pixel, absolute flux units
-    x'    = (D c')_p / (D c')_107                    exactly the build_dataset path
     side' : G -> G',  log10 f550 -> log10 (D c')_107,  log10 SNR550 -> from sigma'
     labels unchanged.
 
@@ -42,7 +41,7 @@ import numpy as np
 import torch
 
 from .data.xp import N_COEF, NORM_INDEX, coef_to_aspgap_input
-from .data.xpnoise import N_TRI, pixel_sigma_abs, unpack_star
+from .data.xpnoise import pixel_sigma_abs, unpack_star
 
 G_LO = 10.0      # first bank bin edge
 DG = 0.1
@@ -118,7 +117,7 @@ class NoiseMatchAugment:
                  fixed_g: float | torch.Tensor | None = None,
                  p: float | None = None) -> dict:
         """batch needs coef (B,110), sigma (B,343), side (B,4: g, bp_rp,
-        log_flux550, log_snr550), valid (B,). Returns a shallow copy with x,
+        log_flux550, log_snr550), valid (B,). Returns a shallow copy with coef,
         sigma, side replaced for degraded rows and `aug` (B,) bool added.
         fixed_g: degrade every star fainter-than-nothing to exactly this G'
         (stars with G >= G' are left unchanged) -- used by evaluation."""
@@ -126,7 +125,6 @@ class NoiseMatchAugment:
         coef = batch["coef"].to(dev).double()
         sig_own = batch["sigma"].to(dev).double()
         side = batch["side"].to(dev).double()
-        x0 = batch["x"].to(dev)
         g = side[:, 0]
         B = len(g)
         gp, b, can = self.draw_target(g, gen, fixed_g)
@@ -154,7 +152,6 @@ class NoiseMatchAugment:
         sig_abs = torch.sqrt((s[:, None] * sig_own * f550_own[:, None]) ** 2
                              + self.sig_d[j] ** 2)
         f550s = torch.where(sel, f550, torch.ones_like(f550))
-        x_new = flux / f550s[:, None]
         sig_new = sig_abs / f550s[:, None]
         side_new = side.clone()
         side_new[:, 0] = gp
@@ -164,9 +161,8 @@ class NoiseMatchAugment:
         c_new = torch.cat([c_bp, c_rp], 1)
         out = dict(batch)
         out["coef"] = torch.where(m, c_new.float(), coef.float())
-        # x0 may be a non-xp343 input (coef110n baseline): leave it, the caller
-        # rebuilds it from out["coef"] / out["side"]
-        out["x"] = torch.where(m, x_new.float(), x0) if x0.shape[1] == x_new.shape[1] else x0
+        # the network input x is NOT touched: the caller rebuilds it from out["coef"] / out["side"]
+        # with apply_aspgap_input()
         out["sigma"] = torch.where(m, sig_new.float(), sig_own.float())
         out["side"] = torch.where(m, side_new.float(), side.float())
         out["aug"] = sel

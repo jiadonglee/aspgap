@@ -37,6 +37,9 @@ from aspgapv3.data.splits import (assign_iid_splits, assign_sky_holdout,  # noqa
 from aspgapv3.data.xp import build_design_matrix, sample_spectra  # noqa: E402
 from aspgapv3.labels.loaders import load_and_clean  # noqa: E402
 
+# columns of labels.npz (build_ext_dataset.py relies on this order); the model trains on teff, logg, m_h, alpha_m
+BUILD_LABELS = ("teff", "logg", "m_h", "alpha_m", "fe_h", "mg_h")
+
 META = {"phot_g_mean_mag": np.nan, "ra": np.nan, "dec": np.nan,
         "snr_bp": np.nan, "snr_rp": np.nan}
 
@@ -60,8 +63,7 @@ def match_xp_chunks(chunk_dir: Path, source_ids: np.ndarray,
     their coefficients + metadata. Returns (catalog_positions, coef110_raw
     [n,110], coef110_aspgap [n,110], meta dict) for the matched subset. The
     raw coefficients are the inverse of the AspGap normalization and are what
-    the SpecCLIP 343-pixel sampling consumes; coef110_aspgap keeps the old
-    network input verbatim for the baseline model."""
+    the 343-pixel sampling consumes; coef110_aspgap is the AspGap-v1 network input verbatim (coef110n)."""
     wanted = {int(s): i for i, s in enumerate(source_ids)}
     files = sorted(chunk_dir.glob("gxp_chunk_*.hdf5"))
     if not files:
@@ -146,8 +148,8 @@ def main() -> None:
     log = lambda m: print(m, flush=True)
 
     # ---- 1-2. ASPCAP: clean + per-label matrices -------------------------
-    labels = list(cfg["labels"]["atm"]) + list(cfg["labels"]["chem"])
-    teff_variant = cfg["data"].get("teff_variant", cfg["labels"].get("teff_variant", "raw"))
+    labels = list(BUILD_LABELS)
+    teff_variant = cfg["data"].get("teff_variant", "raw")
     log(f"[1/6] loading ASPCAP table {args.aspcap} (labels={labels}, "
         f"teff_variant={teff_variant})")
     res = load_and_clean(args.aspcap, labels,
@@ -271,8 +273,6 @@ def main() -> None:
         "splits": cat["split"].value_counts().to_dict(),
         "xp_design": "xp_design_343.npz (grid np.arange(336,1021,2) nm, "
                      "normalized at 550nm = index 107)",
-        "specclip_input_convention": "[B,343,1] into SpecFormerControl1_stats; "
-                                     "mean-pool over 344 tokens",
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     save_config(cfg, out / "build_config.yaml")

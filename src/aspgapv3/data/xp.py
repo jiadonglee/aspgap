@@ -1,22 +1,9 @@
-"""Gaia XP coefficients -> SpecCLIP-compatible 343-pixel input spectra.
+"""Gaia XP coefficients -> 343-pixel spectra and the AspGap-v1 network input.
 
-Convention (cross-checked against SpecCLIP's own downstream code
-`downstream-with-demo/predict_xp_wclip_v0.py` and against the working adapter
-in gaiaworld):
-
-    grid        np.arange(336, 1021, 2) nm  ->  343 samples
-    normalize   flux / flux[107]            (index 107 == 550 nm)
-    tensor      [batch, 343, 1]
-
-We evaluate the BP/RP coefficient system *directly* on that grid via the
-gaiaxpy design matrices (the same machinery old AspGap used, see
-../aspgap/src/xp_utils.py:  flux = coef @ dm, then merge BP/RP with per-pixel
-weights). SpecCLIP linearly interpolated its sampled spectra onto the same
-grid; evaluating the analytic curves at the grid points is the same operation
-without the intermediate resample.
-
-gaiaxpy is needed exactly once, to build the (55, 343) design matrices; they
-are cached to disk and every later build is a matmul.
+Pixel grid np.arange(336, 1021, 2) nm (343 samples), normalized at 550 nm (index 107). The BP/RP
+coefficient system is evaluated directly on the grid via the gaiaxpy design matrices (flux = coef @ dm, BP/RP
+merged with per-pixel weights). gaiaxpy is needed exactly once to build the (55, 343) design matrices; they are
+cached to disk and every later build is a matmul.
 """
 
 from __future__ import annotations
@@ -36,7 +23,7 @@ def design_matrix_cache_path(data_root: str | Path) -> Path:
 
 
 def build_design_matrix(cache_path: str | Path) -> dict[str, np.ndarray]:
-    """Evaluate the gaiaxpy BP/RP design matrices on the SpecCLIP grid.
+    """Evaluate the gaiaxpy BP/RP design matrices on the 343-pixel grid.
 
     Needs gaiaxpy only the first time; afterwards reads the npz cache.
     Returns dict with dm_bp, dm_rp (55, 343), w_bp, w_rp (343,), grid (343,).

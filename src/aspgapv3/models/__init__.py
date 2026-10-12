@@ -1,7 +1,5 @@
-from .encoders import SpecCLIPEncoder, ScratchXPTransformer, CoeffMLPEncoder, build_encoder
+from .encoders import CoeffMLPEncoder
 from .net import XPChemNet, build_model
 from .heads import Trunk, HeteroscedasticHead
 
-__all__ = ["SpecCLIPEncoder", "ScratchXPTransformer", "CoeffMLPEncoder",
-           "build_encoder", "XPChemNet", "build_model", "Trunk",
-           "HeteroscedasticHead"]
+__all__ = ["CoeffMLPEncoder", "XPChemNet", "build_model", "Trunk", "HeteroscedasticHead"]

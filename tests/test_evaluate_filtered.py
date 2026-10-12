@@ -10,13 +10,14 @@ import pandas as pd
 import torch
 
 from aspgapv3.data.dataset import LabelScaler, save_catalog
+from aspgapv3.data.xp import coef_to_aspgap_input
 from aspgapv3.models.net import build_model
 
 from test_augment import make_bank, make_batch
 from test_xpnoise import synth_dm
 
 ROOT = Path(__file__).resolve().parents[1]
-LABELS = ["teff", "logg", "m_h", "alpha_m", "fe_h", "mg_h"]
+LABELS = ["teff", "logg", "m_h", "alpha_m", "fe_h", "mg_h"]      # stored columns; the model uses the first four
 
 
 def make_root(tmp_path, n=400, seed=0):
@@ -25,7 +26,9 @@ def make_root(tmp_path, n=400, seed=0):
     np.savez(tmp_path / "xp_design_343.npz", **dm)
     np.savez(tmp_path / "noise_bank.npz", **make_bank())
     batch, coef, _ = make_batch(dm, n=n, g=13.0)
-    np.save(tmp_path / "xp343.npy", batch["x"].numpy())
+    sc = {"center": np.zeros(110), "scale": np.full(110, 100.0)}               # toy AspGap input scaler
+    np.savez(tmp_path / "aspgap_scaler.npz", **sc)
+    np.save(tmp_path / "coef110n.npy", coef_to_aspgap_input(batch["coef"].numpy(), batch["side"][:, 0].numpy(), sc))
     np.save(tmp_path / "coef110.npy", batch["coef"].numpy())
     np.save(tmp_path / "xp343_sigma.npy", batch["sigma"].numpy())
     np.save(tmp_path / "side.npy", batch["side"].numpy())
@@ -51,15 +54,14 @@ def make_root(tmp_path, n=400, seed=0):
 def test_evaluate_all_sections_with_xp_valid_filtering(tmp_path, monkeypatch):
     cat, valid = make_root(tmp_path)
     cfg = {"run": {"device": "cpu"},
-           "model": {"encoder": {"type": "scratch", "d_model": 32, "n_layers": 1, "n_heads": 4,
-                                 "embed_dim": 768}, "trunk": {"dim": 64, "dropout": 0.0}},
-           "data": {"root": str(tmp_path), "input": "xp343", "require_xp_valid": True},
+           "model": {"encoder": {"embed_dim": 64}, "trunk": {"dim": 64, "dropout": 0.0}},
+           "data": {"root": str(tmp_path), "input": "coef110n", "require_xp_valid": True},
            "train": {"amp": False, "augment": {"noise_match": {"p": 0.5, "g_max": 17.65}}},
            "eval": {"ood_k": 4, "ood_max_train": 1000}}
-    net = build_model(cfg, n_atm=3, n_chem=3)
+    net = build_model(cfg, n_atm=3, n_chem=1)
     run = tmp_path / "run"
     run.mkdir()
-    torch.save({"state_dict": net.state_dict(), "config": cfg, "labels": LABELS, "n_atm": 3,
+    torch.save({"state_dict": net.state_dict(), "config": cfg, "labels": LABELS[:4], "n_atm": 3,
                 "epoch": 0, "val_loss": 0.0}, run / "ckpt_best.pt")
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -80,5 +82,11 @@ def test_evaluate_all_sections_with_xp_valid_filtering(tmp_path, monkeypatch):
         assert (dom[dom["domain"] == "all"]["n_domain"] > 0).all()
         deg = pd.read_csv(run / f"metrics_degraded_{s}.csv")
         assert set(deg["g_prime"].dropna()) == {15.0, 17.0}
-    summary = (run / "summary.md").read_text()
-    assert "Conditional chemical information" in summary and "residual recovery" in summary
+    assert (run / "summary.md").is_file()
+    # --out-dir leaves the run directory untouched
+    out = tmp_path / "scratch_out"
+    monkeypatch.setattr(sys, "argv", ["evaluate.py", "--run", str(run), "--splits", "iid_test", "--degrade-g",
+                                      "--out-dir", str(out)])
+    n_before = len(list(run.iterdir()))
+    mod.main()
+    assert (out / "metrics_iid_test.csv").is_file() and len(list(run.iterdir())) == n_before

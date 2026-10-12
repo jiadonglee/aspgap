@@ -13,16 +13,13 @@ from aspgapv3.dist_eval import distance_tables, parallax_arrays, red_clump
 from aspgapv3.models.distance import (BANDS, COLOUR_K, COLOURS, EXT_K, IntrinsicColourNet, colour_inputs,
                                       colour_nll, distance_losses, parallax_nll, parallax_pred)
 from aspgapv3.models.net import build_model
-from test_p1 import _toy_root, scratch_cfg
+from toy import tiny_cfg, toy_root
 
 CFG = Path(__file__).resolve().parents[1] / "configs"
 
 
 def _cfg(dist=True):
-    c = scratch_cfg()
-    if dist:
-        c["model"]["distance"] = {"enabled": True, "colour_hidden": 16}
-    return c
+    return tiny_cfg(distance=dist)
 
 
 def test_parallax_formula():
@@ -96,7 +93,7 @@ def test_intrinsic_colour_net_never_sees_spectrum():
         net(torch.randn(5, 343))
     # in the full model the colour loss reaches the spectrum ONLY through A0, never through the colour net input
     m = build_model(_cfg(), n_atm=3, n_chem=1).eval()
-    x = torch.rand(6, 343).requires_grad_(True)
+    x = torch.rand(6, 110).requires_grad_(True)
     out = m(x)
     batch = {"y": torch.randn(6, 4), "mask": torch.ones(6, 4, dtype=torch.bool),
              "astro": {"g": torch.full((6,), 14.), "plx": torch.ones(6), "plx_err": torch.full((6,), .05),
@@ -123,25 +120,25 @@ def test_teacher_forcing_fills_missing_labels_with_detached_prediction():
 
 def test_distance_head_outputs_nonneg_a0_and_fp32():
     m = build_model(_cfg(), n_atm=3, n_chem=1)
-    out = m(torch.rand(8, 343) + .5)
+    out = m(torch.rand(8, 110) + .5)
     assert out["mg"].shape == out["logvar_mg"].shape == out["a0"].shape == (8,)
     assert (out["a0"] >= 0).all() and out["mg"].dtype == torch.float32
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        assert m(torch.rand(8, 343) + .5)["mg"].dtype == torch.float32
+        assert m(torch.rand(8, 110) + .5)["mg"].dtype == torch.float32
 
 
 def test_default_off_and_state_dict_identical_without_distance():
     for p in sorted(CFG.glob("*.yaml")):
         has = bool((load_config(p, []).get("model") or {}).get("distance", {}).get("enabled", False))
-        assert has == (p.stem in ("aspgap_dist", "aspgap_dist_ext", "aspgap_dist_ext2", "aspgap_dist_ext2_rc")), p.stem
-    a = build_model(_cfg(False), n_atm=3, n_chem=3)
+        assert has == (p.stem in ("aspgap_dist", "aspgap_dist_ext2")), p.stem
+    a = build_model(_cfg(False), n_atm=3, n_chem=1)
     assert not any("dist" in k or "colour" in k for k in a.state_dict())
-    assert "mg" not in a(torch.rand(2, 343) + .5)
+    assert "mg" not in a(torch.rand(2, 110) + .5)
     cfg = load_config(CFG / "aspgap_dist.yaml", [])
     assert cfg["labels"]["atm"] + cfg["labels"]["chem"] == ["teff", "logg", "m_h", "alpha_m"]
-    assert cfg["train"]["sampler"]["type"] == "random"
-    assert load_config(CFG / "base.yaml", [])["train"]["sampler"]["type"] == "random"
-    assert not cfg["model"]["encoder"].get("side") and not cfg["model"].get("side")   # no brightness input
+    assert cfg["data"]["input"] == "coef110n"             # no brightness input: G-normalized coefficients only
+    ext = load_config(CFG / "aspgap_dist_ext2.yaml", [])
+    assert ext["data"]["root"].endswith("_ext2") and ext["train"] == cfg["train"] and ext["model"] == cfg["model"]
 
 
 def _toy_astro(root, n=60, seed=0):
@@ -165,7 +162,7 @@ def _toy_astro(root, n=60, seed=0):
 
 
 def test_dataset_astro_alignment_masks_and_original_g(tmp_path):
-    _toy_root(tmp_path, with_aux=False)
+    toy_root(tmp_path)
     t = _toy_astro(tmp_path)
     ds = APOGEEDataset(tmp_path, "train", labels=["teff", "logg", "m_h", "alpha_m"], astro=True)
     assert ds.labels == ["teff", "logg", "m_h", "alpha_m"] and ds[0]["y"].shape == (4,)
@@ -233,7 +230,7 @@ def test_anchor_masks_targets_and_loss():
 
 
 def test_dataset_anchors_train_only(tmp_path):
-    _toy_root(tmp_path, with_aux=False)
+    toy_root(tmp_path)
     t = _toy_astro(tmp_path)
     t["parallax"] = 20.0
     t["parallax_error"] = 0.1

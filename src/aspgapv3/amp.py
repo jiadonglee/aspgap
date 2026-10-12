@@ -1,10 +1,7 @@
 """Mixed precision: bf16 autocast on CUDA by default; losses stay in fp32.
 
-fp16 autocast produced NaN train losses in the transformer runs (attention
-logits / layernorm overflow in the SpecCLIP backbone and the unscaled NLL
-exp(logvar)); bf16 has the fp32 exponent range. The forward runs under
-autocast, but mu/logvar are cast to float32 and the NLL is evaluated OUTSIDE
-autocast, so the loss never sees low-precision arithmetic.
+The forward runs under autocast, but mu/logvar are cast to float32 and the NLL is evaluated OUTSIDE
+autocast, so the loss never sees low-precision arithmetic (fp16 gave NaN losses; bf16 has the fp32 exponent range).
 """
 
 from __future__ import annotations

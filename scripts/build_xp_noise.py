@@ -3,7 +3,7 @@
 
     python scripts/build_xp_noise.py --data data/processed/aspcap_v0.6.0_test \
         [--raw-dir /nexus/.../xp_continuous_mean_spectrum] [--nproc 12] \
-        [--bank-per-bin 200] [--verify-n 20] [--limit N]
+        [--bank-per-bin 200] [--limit N]
 
 Writes next to xp343.npy (row order == catalog['row'] == xp343 row):
 
@@ -15,8 +15,7 @@ Writes next to xp343.npy (row order == catalog['row'] == xp343 row):
                    / flux_550_abs, i.e. gaiaxpy's calibrate() flux_error divided
                    by the 550nm flux, in the units of xp343. The 550nm normalizer
                    is treated as noise-free (sigma_550 /= 0 here); the exact
-                   first-order ratio sigma differs near 550nm only (documented in
-                   PROGRESS.md; see xpnoise.normalized_sigma_ratio).
+                   first-order ratio sigma differs near 550nm only (see xpnoise.normalized_sigma_ratio).
   side.npy         float32 [n, 4]  columns in xpnoise_meta.json:
                    phot_g_mean_mag (catalog), bp_rp (gxp_chunk 'bp_rp', DR3
                    BP-RP), log10_flux550 (design-matrix-absolute merged flux at
@@ -26,8 +25,6 @@ Writes next to xp343.npy (row order == catalog['row'] == xp343 row):
   noise_bank.npz   (unless --no-bank) donors: ~200 random XP stars per 0.1 mag G
                    bin over G in [10, 17.7), Cholesky factors in ABSOLUTE
                    units, plus the G histogram of the entire XP catalog.
-  [--verify-n] xpnoise_verify_raw.npz  raw rows of N stars for the gaiaxpy
-                   cross-check (scripts/verify_xp_gaiaxpy.py, env `xpbuild`).
 
 Raw DR3 files: XpContinuousMeanSpectrum_<lo>-<hi>.h5, sorted by source_id; the
 name gives the inclusive range of source_id >> 43, so a star is routed to its
@@ -180,7 +177,6 @@ def main() -> None:
     ap.add_argument("--bank-frac", type=float, default=0.003,
                     help="random fraction of the XP catalog kept as bank candidates")
     ap.add_argument("--no-bank", action="store_true")
-    ap.add_argument("--verify-n", type=int, default=20)
     ap.add_argument("--limit", type=int, default=0, help="debug: first N catalog rows")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
@@ -260,12 +256,6 @@ def main() -> None:
     }
     log(json.dumps(meta, indent=1))
 
-    if args.verify_n:
-        rng = np.random.default_rng(args.seed)
-        pick = np.sort(rng.choice(np.where(good)[0], args.verify_n, replace=False))
-        _dump_verify(root / "xpnoise_verify_raw.npz", sids[pick], files, r, pick, f550,
-                     np.load(root / "xp343.npy", mmap_mode="r")[pick])
-
     # ---- 5. donor bank ------------------------------------------------------
     if not args.no_bank:
         log("[5/5] noise donor bank")
@@ -273,23 +263,6 @@ def main() -> None:
     meta["bank"] = None if args.no_bank else "noise_bank.npz"
     (root / "xpnoise_meta.json").write_text(json.dumps(meta, indent=2))
     log("done.")
-
-
-def _dump_verify(path, sids, files, r, pick, f550, xp343):
-    raw = {k: [] for k in ("bp_coefficients", "bp_coefficient_errors",
-                           "bp_coefficient_correlations", "bp_standard_deviation",
-                           "rp_coefficients", "rp_coefficient_errors",
-                           "rp_coefficient_correlations", "rp_standard_deviation")}
-    lo = np.array([f[0] for f in files])
-    for s in sids:
-        f = files[int(np.searchsorted(lo, s >> 43, side="right") - 1)][2]
-        with h5py.File(f, "r") as h:
-            row = int(np.searchsorted(h["source_id"][:], s))
-            for k in raw:
-                raw[k].append(h[k][row])
-    np.savez(path, source_id=sids, my_sigma_abs=r["sigma_abs"][pick],
-             my_flux_abs=r["flux"][pick], my_f550=f550[pick], xp343=np.asarray(xp343),
-             **{k: np.stack(v) for k, v in raw.items()})
 
 
 def build_bank(root, cand_sid, cand_g, hist, files, args, dm_path):

@@ -72,7 +72,7 @@ def test_missing_labels_are_masked_in_nll():
     assert float(lc(torch.randn(n, 1), torch.zeros(n, 1), torch.randn(n, 1), torch.ones(n, 1), z)) == 0.0
 
 
-EXT = REPO / "data/processed/aspcap_v0.6.0_ext"
+EXT = REPO / "data/processed/aspcap_v0.6.0_ext2"
 ROOT = REPO / "data/processed/aspcap_v0.6.0"
 
 
@@ -100,22 +100,21 @@ def test_extended_root_integrity():
         assert not set(s[s.role == "train"].source_id) & set(s[s.role == "heldout"].source_id)
 
 
-EXT2 = REPO / "data/processed/aspcap_v0.6.0_ext2"
-
-
-@pytest.mark.skipif(not (EXT2 / "catalog.parquet").exists(), reason="ext2 dataset not built")
-def test_ext2_same_holdout_fewer_gc():
-    c1 = pd.read_parquet(EXT / "catalog.parquet", columns=["source_id", "source"])
-    c2 = pd.read_parquet(EXT2 / "catalog.parquet", columns=["source_id", "source"])
-    for s in ("galah", "lamost_vmp"):                                   # identical GALAH / VMP training rows
-        assert set(c1.source_id[c1.source == s]) == set(c2.source_id[c2.source == s])
-    sp = pd.read_parquet(REPO / "data/processed/ood/ood_split_ext2.parquet")
-    old = pd.read_parquet(REPO / "data/processed/ood/ood_split.parquet")
-    h = lambda d: set(map(tuple, d[d.role == "heldout"][["source_id", "component"]].to_numpy()))
-    assert h(sp) == h(old)                                              # same held-out evaluation rows
-    g2 = c2.source_id[c2.source == "gc"]
-    assert 0 < len(g2) < (c1.source == "gc").sum()
-    assert not g2.isin(sp.source_id[(sp.role == "heldout") & (sp.component == "cluster_gc")]).any()
+@pytest.mark.skipif(not (EXT / "catalog.parquet").exists() or not (REPO / "data/processed/ood/ood_cluster_gc.parquet").exists(),
+                    reason="extended dataset / OOD parquets not available")
+def test_select_reproduces_ext2_training_rows():
+    """The selection (GALAH / GC / VMP, GC cuts, cap 100) reproduces the external rows of the stored root."""
+    meta = {}
+    tab, X, split = b.select(meta)
+    c = pd.read_parquet(EXT / "catalog.parquet", columns=["source_id", "source"])
+    stored = c[c.source != "apogee"]
+    assert set(tab.source_id) == set(stored.source_id)
+    assert tab.groupby("source").size().to_dict() == stored.groupby("source").size().to_dict()
+    n_gc = int((tab.source == "gc").sum())
+    assert n_gc <= meta["gc"]["cuts"]["steps"][-1]["n_stars"] <= b.GC2_CAP * len(meta["gc"]["train_clusters"])   # a few duplicates go to GALAH
+    held = split[(split.component == "cluster_gc") & (split.role == "heldout")]
+    assert not tab.source_id[tab.source == "gc"].isin(held.source_id).any()    # held-out clusters never trained on as GC members
+    assert len(X) == len(tab)
 
 
 def test_gc_consistency_helpers():

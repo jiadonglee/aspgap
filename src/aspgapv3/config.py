@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 from pathlib import Path
 
@@ -49,18 +48,6 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> dict:
         if not _:
             raise ValueError(f"--set expects key=value, got {ov!r}")
         _set(cfg, key, _coerce(val))
-    return cfg
-
-
-def resolve_ckpt(cfg: dict) -> dict:
-    """Fill encoder ckpt path if unset (env ASPGAP_SPECCLIP_CKPT or the
-    gaiaworld checkout beside this repo)."""
-    enc = cfg.get("model", {}).get("encoder", {})
-    if enc.get("type") == "specclip" and not enc.get("ckpt_path"):
-        from .models.encoders import default_specclip_ckpt
-        p = default_specclip_ckpt()
-        if p is not None:
-            enc["ckpt_path"] = str(p)
     return cfg
 
 

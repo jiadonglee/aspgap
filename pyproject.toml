@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aspgapv3"
 version = "0.1.0"
-description = "Gaia XP -> APOGEE chemical label transfer on SpecCLIP representations"
+description = "Gaia XP -> APOGEE-scale Teff, logg, [M/H], [alpha/M] plus M_G and A0"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",

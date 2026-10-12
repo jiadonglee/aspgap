@@ -13,15 +13,14 @@ APOGEEDataset.__getitem__ returns a dict:
     yerr   float32 [K]        normalized 1-sigma errors
     mask   bool    [K]
     index  int
-  with `aux=[...]` (labels_aux.npz + norm_aux.npz, see build_aux_labels.py):
-    y_aux, yerr_aux  float32 [A] normalized; mask_aux bool [A]
   and, with `noise=True` (needs scripts/build_xp_noise.py outputs):
     sigma  float32 [343]      xp343_sigma (per-pixel 1-sigma, xp343 units)
     side   float32 [4]        phot_g_mean_mag, bp_rp, log10_flux550, log10_snr550
     coef   float32 [110]      raw DR3 BP|RP coefficients (augmentation input)
     valid  bool               star has a usable coefficient covariance
-Everything the loss needs is per-label; a star with only [Fe/H] carries only
-[Fe/H]. No star was dropped for missing labels.
+With `astro=True` (needs astrometry_phot.parquet) the item also carries the `astro` dict used by the distance
+losses (parallax, colours, A0 anchors).
+Everything the loss needs is per-label; a star with only [M/H] carries only [M/H].
 """
 
 from __future__ import annotations
@@ -33,8 +32,6 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-
-from ..rc_anchor import RC_SET, calibrate_rc, rc_anchor_targets
 
 
 # ---------------------------------------------------------------- catalog IO
@@ -118,14 +115,8 @@ class APOGEEDataset(Dataset):
     """One split of the processed ASPCAP x Gaia-XP sample."""
 
     def __init__(self, root: str | Path, split: str = "train",
-                 input: str = "xp343", labels: list[str] | None = None,
-                 noise: bool = False, require_xp_valid: bool = False,
-                 aux: list[str] | None = None, aux_ref: str = "h",
-                 latent: str | None = None, astro: bool = False,
-                 rc_anchor: dict | None = None):
-        if aux_ref not in ("h", "fe"):
-            raise ValueError(f"labels.aux_ref must be h|fe, got {aux_ref!r}")
-        self.aux_ref = aux_ref
+                 input: str = "coef110n", labels: list[str] | None = None,
+                 noise: bool = False, require_xp_valid: bool = False, astro: bool = False):
         self.root = Path(root)
         self.split = split
         self.input = input
@@ -190,64 +181,10 @@ class APOGEEDataset(Dataset):
         self.scaler = scaler
         self.floor_norm = scaler.floor_norm.astype(np.float32)
 
-        # auxiliary labels (P1): separate files, never part of `labels` / metrics
-        self.aux_labels: list[str] = list(aux or [])
-        if self.aux_labels:
-            self._load_aux(cat)
-
-        # teacher latent target (v1_latent.npy + v1_latent_norm.npz, scripts/build_v1_latent.py):
-        # row-indexed like the other arrays, standardized with TRAIN-split stats. Always the
-        # latent of the CLEAN input (the augmenter never touches it).
-        self.latent = latent
-        if latent:
-            self._load_latent(cat, latent)
-
         # Gaia parallax + 2MASS/WISE colours (astrometry_phot.parquet, build_astrometry_phot.py)
         self.astro = bool(astro)
-        self.rc_cfg = dict(rc_anchor) if rc_anchor else None      # red-clump A0 anchors (rc_anchor.py); None = off
-        self.rc_calib = None
         if self.astro:
             self._load_astro(cat)
-
-        # per-label sample weights can be attached later by the trainer
-        self.label_weights = np.ones(len(self.labels), dtype=np.float32)
-
-    def _load_aux(self, full_cat: pd.DataFrame) -> None:
-        """labels_aux.npz + norm_aux.npz (scripts/build_aux_labels.py), aligned
-        to the catalog row order and checked against it via source_id."""
-        fy, fn = self.root / "labels_aux.npz", self.root / "norm_aux.npz"
-        for f in (fy, fn):
-            if not f.is_file():
-                raise FileNotFoundError(
-                    f"labels.aux={self.aux_labels} configured but {f} is missing; "
-                    f"run scripts/build_aux_labels.py --root {self.root}")
-        z = np.load(fy, allow_pickle=False)
-        sc = LabelScaler.load(self.root, "norm_aux.npz")
-        have = [str(s) for s in z["labels"]]
-        missing = [n for n in self.aux_labels if n not in have]
-        if missing:
-            raise ValueError(f"aux labels {missing} not in {fy} (available: {have})")
-        full_sid = full_cat.sort_values("row")["source_id"].to_numpy()
-        if len(full_sid) != len(z["y"]) or not np.array_equal(
-                z["source_id"].astype(np.int64), full_sid.astype(np.int64)):
-            raise ValueError(f"{fy} is not aligned with catalog row order (source_id mismatch)")
-        col = [have.index(n) for n in self.aux_labels]
-        if self.aux_ref == "h":                                  # [X/H] as stored
-            y = z["y"][self.indices][:, col]
-            yerr = z["yerr"][self.indices][:, col]
-            self.mask_aux = z["mask"][self.indices][:, col].astype(bool)
-            self.aux_scaler = LabelScaler(sc.mean[col], sc.std[col], sc.floor_norm[col],
-                                          self.aux_labels)
-        else:                                                    # [X/Fe] = X_H - fe_h
-            y_all, e_all, m_all, floor_raw = self._aux_over_fe(z, sc, col, full_cat)
-            tr = (full_cat.sort_values("row")["split"] == "train").to_numpy()
-            self.aux_scaler = LabelScaler.fit(y_all[tr], e_all[tr], m_all[tr], floor_raw,
-                                              self.aux_labels)
-            y, yerr, self.mask_aux = y_all[self.indices], e_all[self.indices], m_all[self.indices]
-        self.y_aux_raw, self.yerr_aux_raw = y, yerr
-        self.y_aux = self.aux_scaler.transform_y(y).astype(np.float32)
-        self.yerr_aux = self.aux_scaler.transform_err(yerr).astype(np.float32)
-        self.floor_aux = self.aux_scaler.floor_norm.astype(np.float32)
 
     def _load_astro(self, full_cat: pd.DataFrame) -> None:
         """Per-star parallax likelihood inputs and observed colours for the distance model.
@@ -261,8 +198,6 @@ class APOGEEDataset(Dataset):
         full_sid = full_cat.sort_values("row")["source_id"].to_numpy().astype(np.int64)
         if len(t) != len(full_sid) or not np.array_equal(t["source_id"].to_numpy(np.int64), full_sid):
             raise ValueError(f"{f} is not aligned with catalog row order (source_id mismatch)")
-        if self.rc_cfg:
-            self.rc_calib, rc_all = self._rc_anchor_all(full_cat, t)       # needs the FULL catalogue (train calibration)
         t = t.iloc[self.indices].reset_index(drop=True)
         self.astro_table = t                           # l, b, ra, dec, raw photometry for evaluation
         g = t["phot_g_mean_mag"].to_numpy(np.float64)       # Gaia G of the original star
@@ -290,16 +225,8 @@ class APOGEEDataset(Dataset):
         tgt, asig, aset = anchor_targets(plx - zp, e, t["b"].to_numpy(float), ebv)
         aset = np.where(ok & (self.split == "train"), aset, 0).astype(np.int8)
         self.anchor_set = aset
-        rc_ok = np.zeros(len(t), bool)
-        if self.rc_cfg:
-            # red-clump anchors: train split only, never on a star that is already a nearby / high-lat anchor
-            rt, rs, rk = (v[self.indices] for v in rc_all)
-            rc_ok = rk & ok & (self.split == "train") & (aset == 0)
-            self.anchor_set = np.where(rc_ok, RC_SET, aset).astype(np.int8)
-            tgt, asig = np.where(rc_ok, rt, tgt), np.where(rc_ok, rs, asig)
         self.astro_arr = {
             "anc_t": tgt.astype(np.float32), "anc_s": asig.astype(np.float32), "anc_ok": aset > 0,
-            "rc_ok": rc_ok,
             "g": g.astype(np.float32), "plx": np.nan_to_num(plx).astype(np.float32),
             "plx_err": np.where(ok, e, 1.0).astype(np.float32), "zp": zp.astype(np.float32),
             "plx_ok": ok, "col": np.nan_to_num(col).astype(np.float32),
@@ -307,74 +234,6 @@ class APOGEEDataset(Dataset):
             "mag": np.nan_to_num(np.stack([mag[b] for b in BANDS], 1)).astype(np.float32),
             "mag_ok": np.stack([good[b] for b in BANDS], 1),
         }
-
-    def _rc_anchor_all(self, full_cat: pd.DataFrame, t: pd.DataFrame):
-        """RC calibration on the TRAIN APOGEE stars of the whole catalogue and RC anchor (target, sigma, ok)
-        for every catalogue row.  Uses the stored raw teff / logg / [M/H] labels."""
-        from ..models.distance import PLX_ZP_FALLBACK
-        cfg = self.rc_cfg
-        sc = LabelScaler.load(self.root)
-        z = np.load(self.root / "labels.npz")
-        lab = {n: np.where(z["mask"][:, i], z["y"][:, i], np.nan) for i, n in enumerate(sc.labels)}
-        fc = full_cat.sort_values("row").reset_index(drop=True)
-        plx, e = t["parallax"].to_numpy(float), t["parallax_error"].to_numpy(float)
-        zp = t["zpt"].to_numpy(float) if "zpt" in t else np.full(len(t), PLX_ZP_FALLBACK)
-        zp = np.where(np.isfinite(zp), zp, PLX_ZP_FALLBACK)
-        g = t["phot_g_mean_mag"].to_numpy(float)
-        ebv = t["ebv_sfd"].to_numpy(float) if "ebv_sfd" in t else np.full(len(t), np.nan)
-        ruwe = t["ruwe"].to_numpy(float) if "ruwe" in t else np.zeros(len(t))
-        base = ((fc["split"] == "train") & (fc["source"] == "apogee")).to_numpy() if "source" in fc \
-            else (fc["split"] == "train").to_numpy()
-        with np.errstate(invalid="ignore"):
-            good = np.isfinite(e) & (e > 0) & np.isfinite(plx)
-        sub = base & good
-        calib = calibrate_rc(g[sub], (plx - zp)[sub], e[sub], lab["m_h"][sub], lab["teff"][sub], lab["logg"][sub],
-                             ebv[sub], ruwe[sub])
-        out = rc_anchor_targets(g, plx - zp, np.where(good, e, np.nan), lab["m_h"], lab["teff"], lab["logg"], calib,
-                                snr_min=float(cfg.get("snr_min", 5.0)),
-                                sig_mu_floor=float(cfg.get("sig_mu_floor", 0.1)))
-        # anchors only from APOGEE-labelled rows (external GALAH / GC / VMP labels are never used for the RC window)
-        ok = out[2] & (fc["source"] == "apogee").to_numpy() if "source" in fc else out[2]
-        return calib, (out[0], out[1], ok)
-
-    def _load_latent(self, full_cat: pd.DataFrame, source: str) -> None:
-        if source != "v1_latent":
-            raise ValueError(f"model.latent_head.source must be v1_latent, got {source!r}")
-        fl, fn = self.root / "v1_latent.npy", self.root / "v1_latent_norm.npz"
-        for f in (fl, fn):
-            if not f.is_file():
-                raise FileNotFoundError(f"latent_head.source=v1_latent but {f} is missing; "
-                                        f"run scripts/build_v1_latent.py --root {self.root}")
-        z = np.load(fn, allow_pickle=False)
-        full_sid = full_cat.sort_values("row")["source_id"].to_numpy().astype(np.int64)
-        self.lat_arr = np.load(fl, mmap_mode="r")
-        if len(full_sid) != len(self.lat_arr) or not np.array_equal(z["source_id"], full_sid):
-            raise ValueError(f"{fl} is not aligned with catalog row order (source_id mismatch)")
-        self.lat_mean = z["mean"].astype(np.float32)
-        self.lat_std = np.maximum(z["std"].astype(np.float32), 1e-4)
-        self.lat_valid = z["valid"].astype(bool)
-        self.latent_dim = int(self.lat_arr.shape[1])
-
-    def _aux_over_fe(self, z, sc, col, full_cat):
-        """[X/Fe] targets for ALL catalog rows: y = X_H - fe_h (main label),
-        err = sqrt(e_X^2 + e_Fe^2) -- the correlated part of the two ASPCAP
-        errors is ignored (conservative), floor = sqrt(floor_X^2 + floor_Fe^2)
-        in raw units, mask = mask_X & mask_Fe. Normalisation stats are fit on the
-        TRAIN split (all train rows of the catalog, independent of which split
-        this dataset instance holds) at load time, so every instance agrees."""
-        zm = np.load(self.root / "labels.npz")
-        main = [str(s) for s in zm["labels"]]
-        if "fe_h" not in main:
-            raise ValueError("labels.aux_ref=fe needs fe_h among the main labels")
-        k = main.index("fe_h")
-        msc = LabelScaler.load(self.root)
-        fe, efe, mfe = zm["y"][:, k], zm["yerr"][:, k], zm["mask"][:, k].astype(bool)
-        m_all = z["mask"][:, col].astype(bool) & mfe[:, None]
-        y_all = np.where(m_all, z["y"][:, col] - fe[:, None], np.nan)
-        e_all = np.where(m_all, np.sqrt(z["yerr"][:, col] ** 2 + efe[:, None] ** 2), np.nan)
-        floor_fe = msc.floor_norm[k] * msc.std[k]
-        floor_raw = np.sqrt((sc.floor_norm[col] * sc.std[col]) ** 2 + floor_fe ** 2)
-        return y_all.astype(np.float32), e_all.astype(np.float32), m_all, floor_raw
 
     def __len__(self) -> int:
         return len(self.catalog)
@@ -388,15 +247,6 @@ class APOGEEDataset(Dataset):
                      "side": torch.from_numpy(np.array(self.side[row], np.float32)),
                      "coef": torch.from_numpy(np.array(self.coef[row], np.float32)),
                      "valid": torch.tensor(bool(self.valid[row]))}
-        if self.latent:
-            lat = (np.asarray(self.lat_arr[row], np.float32) - self.lat_mean) / self.lat_std
-            extra = {**extra, "lat": torch.from_numpy(lat),
-                     "lat_ok": torch.tensor(bool(self.lat_valid[row]))}
-        if self.aux_labels:
-            extra = {**extra,
-                     "y_aux": torch.from_numpy(np.nan_to_num(self.y_aux[i])),
-                     "yerr_aux": torch.from_numpy(np.nan_to_num(self.yerr_aux[i])),
-                     "mask_aux": torch.from_numpy(self.mask_aux[i])}
         if self.astro:
             extra = {**extra, "astro": {k: torch.as_tensor(v[i]) for k, v in self.astro_arr.items()}}
         return {

@@ -1,5 +1,5 @@
-# Shared defaults. Every model config inherits these; override per-run with
-# `python scripts/train.py --config X.yaml --set train.epochs=50`.
+# Shared defaults. Override per run with `python scripts/train.py --config X.yaml --set train.epochs=50`.
+# Also read by scripts/build_dataset.py (data.* and labels.* keys).
 
 run:
   name: base
@@ -9,11 +9,11 @@ run:
 
 data:
   root: data/processed/aspcap_v0.6.0
-  input: xp343          # xp343 | coef110
+  input: coef110n       # network input: G-normalized, RobustScaled BP/RP coefficients (AspGap v1 convention)
   teff_variant: raw     # raw | calibrated (calibrated embeds XP photometry via IRFM!)
   snr_min: 50.0
   teff_max: 8000.0
-  require_xp_valid: true   # drop rows with xpcov_valid==False from every split/input type (needs build_xp_noise.py); false = old behaviour
+  require_xp_valid: true   # drop rows with xpcov_valid==False from every split (needs build_xp_noise.py)
   dedupe: max_snr       # one row per gaia_dr3_source_id
   splits:
     train: 0.90
@@ -23,16 +23,11 @@ data:
     seed: 42
 
 labels:
-  # Tier 1. teff is an auxiliary target; science metrics are the chem labels.
-  chem: [alpha_m, fe_h, mg_h]
   atm: [teff, logg, m_h]
-  teff_variant: raw     # duplicated from data.teff_variant if unset
-  # element flag policy: bits 5-8 (censored x3, bad grid edge) always mask;
-  # warn bits 9-11 (warn grid edge / teff / m_h) additionally mask when true
-  mask_warn_bits: true
-  # per-label sigma floors (raw units): keep tiny formal ASPCAP errors from
-  # dominating the NLL; Astra uncertainties are repeat-visit based and
-  # underestimate systematics.
+  chem: [alpha_m]
+  mask_warn_bits: true   # element flag bits 9-11 (warn grid edge / teff / m_h) also mask
+  # per-label sigma floors (raw units): keep tiny formal ASPCAP errors from dominating the NLL.
+  # (build_dataset.py always stores teff, logg, m_h, alpha_m, fe_h, mg_h; only atm + chem are trained.)
   sigma_floor:
     teff: 50.0
     logg: 0.05
@@ -40,52 +35,29 @@ labels:
     alpha_m: 0.02
     fe_h: 0.02
     mg_h: 0.02
-  # NOTE: weight_atm is currently INEFFECTIVE under loss_weighting: per_group (each group's
-  # NLL is normalised by its own sum(mask*w), so a uniform weight cancels). It only acts with
-  # loss_weighting: global. Kept at default per_group so old runs/checkpoints are comparable.
-  weight_atm: 0.5
-  loss_weighting: per_group   # per_group | global: total = w_atm*l_atm + l_chem + w_aux*l_aux
-  # P1 auxiliary element abundances (needs labels_aux.npz/norm_aux.npz from
-  # scripts/build_aux_labels.py). [] => off. Trained only through an auxiliary
-  # heteroscedastic head, never reported as science outputs. weight_aux is a
-  # scalar on the aux NLL term (the NLL is mask-normalized per term).
-  aux: []
-  aux_ref: h             # h: aux targets [X/H]; fe: [X/Fe] = X_H - fe_h (err in quadrature, mask_X & mask_Fe)
-  weight_aux: 0.3
 
 model:
   encoder:
-    type: specclip      # specclip | scratch | coeff_mlp
-    ckpt_path: null          # resolved to ../gaiaworld/specclip_assets/xp_encoder.ckpt
-    unfreeze_last_k: 0  # Stage A: 0; Stage B: 2; Stage C: -1 (all)
-    embed_dim: 768
+    embed_dim: 768       # MLP encoder output / trunk input
   trunk:
     dim: 256
     dropout: 0.1
-  heads:
-    chem_condition: none   # none | atm_detached | atm: H_chem sees concat(z, mu_atm[, logvar_atm])
-    cond_logvar: false     # also feed logvar_atm to the conditioned head(s)
-    aux_condition: true    # aux head gets the same conditioning as H_chem (if chem_condition != none)
 
 train:
   epochs: 60
   batch_size: 256
   num_workers: 4
   lr_head: 3.0e-4
-  lr_enc: 0.0           # 0 => encoder params frozen/absent from optimizer
+  lr_enc: 3.0e-4
   weight_decay: 1.0e-2
   warmup_epochs: 3
   grad_clip: 1.0
   amp: true
-  amp_dtype: bf16      # bf16 | fp16 (fp16 gave NaN losses with the SpecCLIP backbone)
+  amp_dtype: bf16      # bf16 | fp16
   early_stop_patience: 12
   logvar_clamp: [-8.0, 8.0]
-  sampler:
-    type: random        # random | binned (binned is pathological: top 1% of stars get ~94% of draws)
-    power: 0.5          # p_bin ∝ 1 / N_bin^power
-    bins: {teff: 300.0, logg: 0.5, m_h: 0.25}
 
 eval:
-  amp: false           # evaluation in fp32 (comparable to older runs)
+  amp: false           # evaluation in fp32
   ood_k: 8
   ood_max_train: 200000

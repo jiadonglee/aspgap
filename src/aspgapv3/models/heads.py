@@ -1,6 +1,6 @@
 """Trunk + heteroscedastic heads.
 
-z_768 -> Trunk -> z_256 -> {H_atm(auxiliary), H_chem}. Every quantity is
+z_768 -> Trunk -> z_256 -> {H_atm, H_chem}. Every quantity is
 predicted as (mu, log sigma^2); the NLL folds in APOGEE errors and sigma
 floors, so logvar is a *relative* excess-variance term, not the total error.
 """

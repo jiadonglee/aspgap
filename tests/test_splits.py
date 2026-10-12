@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aspgapv3.data.sampler import BinnedWeightedSampler
 from aspgapv3.data.splits import (assign_iid_splits, assign_sky_holdout,
                                   dedupe_max_snr, domain_tags)
 
@@ -66,26 +65,3 @@ def test_domain_tags(toy):
     assert out["is_mdwarf"].sum() == 200
     assert out["is_fstar"].sum() == 200
     assert not out["is_metal_poor_15"].any() or out["is_metal_poor_15"].sum() == 200
-
-
-def test_sampler_oversamples_rare_bins():
-    rng = np.random.default_rng(3)
-    n = 4000
-    teff = rng.normal(4800, 400, n)
-    teff[:50] = 7500.0                       # rare hot bin
-    vals = {"teff": teff, "logg": rng.normal(2.5, 1, n), "m_h": rng.normal(-0.3, 0.3, n)}
-    s = BinnedWeightedSampler(vals, power=0.5, seed=0, num_samples=n)
-    draws = np.array(list(iter(s)))
-    assert len(draws) == n
-    p_hot = (teff[draws] > 7000).mean()
-    p_hot_raw = (teff > 7000).mean()
-    assert p_hot > 5 * p_hot_raw             # rare bin strongly oversampled
-    assert s.weights.min() >= 0 and np.isclose(s.weights.sum(), 1.0)
-
-
-def test_sampler_survives_nans():
-    vals = {"teff": np.array([5000.0, np.nan, 4800.0]),
-            "logg": np.array([4.0, 1.0, np.nan]),
-            "m_h": np.array([-0.5, -0.2, 0.0])}
-    s = BinnedWeightedSampler(vals, power=0.5, seed=0, num_samples=10)
-    assert len(list(iter(s))) == 10

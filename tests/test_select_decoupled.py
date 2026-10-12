@@ -19,12 +19,11 @@ def run_train(tmp_path, monkeypatch, train_extra, model=None, ckpt=False):
     make_root(tmp_path / "data_root")
     cfg = {"inherit": str(ROOT / "configs" / "base.yaml"),
            "run": {"name": "t", "out_dir": str(tmp_path / "runs"), "device": "cpu"},
-           "data": {"root": str(tmp_path / "data_root"), "input": "xp343", "require_xp_valid": True},
-           "model": model or {"encoder": {"type": "scratch", "d_model": 32, "n_layers": 1, "n_heads": 4,
-                                          "embed_dim": 768, "unfreeze_last_k": -1},
-                              "trunk": {"dim": 64, "dropout": 0.0}},
+           "data": {"root": str(tmp_path / "data_root"), "input": "coef110n", "require_xp_valid": True},
+           "labels": {"atm": ["teff", "logg", "m_h"], "chem": ["alpha_m"]},
+           "model": model or {"encoder": {"embed_dim": 64}, "trunk": {"dim": 64, "dropout": 0.0}},
            "train": {"epochs": 1, "batch_size": 16, "num_workers": 0, "lr_enc": 1e-4, "amp": False,
-                     "sampler": {"type": "random"}, **train_extra}}
+                     **train_extra}}
     f = tmp_path / "cfg.yaml"
     f.write_text(yaml.safe_dump(cfg))
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)

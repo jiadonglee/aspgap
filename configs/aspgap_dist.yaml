@@ -1,22 +1,18 @@
-# FINAL AspGap-v3 model ("step 1"): the aspgap110_aug_rand recipe (G-normalized, RobustScaled
-# BP/RP coefficients -> MLP trunk, noise-matched augmentation p=0.5, heteroscedastic NLL, RANDOM
-# sampler) with four atmospheric labels plus
-#   * M_G  (intrinsic absolute G mag, learned sigma_MG) and A0 (extinction at 550 nm, >= 0),
-#   * trained by a Gaia parallax likelihood (all stars with a parallax, no S/N / sign cut,
-#     Lindegren+2021 zero-point) and a 2MASS/WISE photometric forward model
-#     (intrinsic-colour net of (Teff, logg, [M/H], [alpha/M]) ONLY + fixed extinction coefficients).
-# No apparent magnitude or other brightness is given to the network: M_G has to come from the
-# spectral shape (no Malmquist shortcut). Distance at inference: mu = G - M_G - 0.789 * A0.
-# Needs data/processed/.../astrometry_phot.parquet (scripts/build_astrometry_phot.py).
-inherit: aspgap110_aug_rand.yaml
+# AspGap-v3, APOGEE-only (run aspgap_dist_r3): G-normalized, RobustScaled BP/RP coefficients -> MLP -> trunk with
+#   * heteroscedastic heads for Teff, logg, [M/H] and [alpha/M] (APOGEE/ASPCAP labels),
+#   * M_G (intrinsic absolute G mag, learned sigma_MG) and A0 (extinction at 550 nm, >= 0), trained with a Gaia
+#     parallax likelihood (all stars with a parallax, Lindegren+2021 zero-point), a 2MASS/WISE photometric
+#     forward model (intrinsic-colour net of the four labels + fixed extinction coefficients) and A0 anchors
+#     (nearby A0 = 0, high-latitude A0 = SFD),
+#   * noise-matched augmentation (APOGEE stars degraded to faint-star XP noise, p = 0.5), random sampler.
+# No apparent magnitude enters the network: M_G has to come from the spectral shape.
+# Distance at inference: mu = G - M_G - 0.789 * A0.
+# Needs data/processed/.../astrometry_phot.parquet (scripts/build_astrometry_phot.py) and the noise bank
+# (scripts/build_xp_noise.py).
+inherit: base.yaml
 
 run:
   name: aspgap_dist
-
-labels:
-  atm: [teff, logg, m_h]
-  chem: [alpha_m]            # fe_h / mg_h dropped; no auxiliary X/Fe heads
-  aux: []
 
 model:
   distance:
@@ -24,4 +20,13 @@ model:
     colour_hidden: 128
     weight_plx: 0.1          # init NLLs: label 0.93, plx 233, phot 202 (w=1) -> weighted ~23/20 at init, O(0.1) once trained
     weight_phot: 0.1
-    weight_anchor: 1.0       # A0 anchors (train only): nearby A0=0, high-latitude A0=SFD; see models/distance.py
+    weight_anchor: 1.0       # A0 anchors (train only), see models/distance.py
+
+train:
+  epochs: 100
+  select_on: mean            # clean | degraded | mean (checkpoint selection + early stop)
+  augment:
+    noise_match:
+      p: 0.5
+      g_target: catalog_hist
+      g_max: 17.65

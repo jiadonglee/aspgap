@@ -19,11 +19,7 @@ Leakage note: the canonical TRAINING Teff is therefore `raw_teff`. The
 published (IRFM-calibrated) `teff` is kept for reporting and is explicitly
 disclaimed as an independent validation quantity.
 
-Tier policy (project definition):
-  Tier 1: teff, logg, m_h, alpha_m, fe_h, mg_h  (mg_fe is derived, not fit)
-  Tier 2: further ASPCAP individual abundances, added only after each is shown
-          to carry XP-transferred information
-  Tier 3: weak-information elements (Ce, Na, K, V, Nd, ... C/N ages)
+Stored labels: teff, logg, m_h, alpha_m, fe_h, mg_h (the final model trains on teff, logg, m_h, alpha_m).
 """
 
 from __future__ import annotations
@@ -45,24 +41,13 @@ class LabelSpec:
     description: str = ""
 
 
-def _aux_element(name: str, floor: float,
-                 valid_range: tuple[float, float] = (-4.0, 1.5)) -> LabelSpec:
-    """Auxiliary element abundance following the astra naming scheme
-    `<el>_h`, `e_<el>_h`, `<el>_h_flags` (verified for every <el> in HDU2)."""
-    return LabelSpec(
-        name=name, tier=3, group="aux", unit="dex",
-        column=(name, name.upper()), error_column=(f"e_{name}", f"{name}_err"),
-        flag_column=(f"{name}_flags",), sigma_floor=floor, valid_range=valid_range,
-    )
-
-
 LABELS: tuple[LabelSpec, ...] = (
     LabelSpec(
         name="teff", tier=1, group="atm", unit="K",
         column=("raw_teff", "teff_raw", "TEFF"),
         error_column=("raw_e_teff", "e_teff", "TEFF_ERR"),
         sigma_floor=50.0, valid_range=(2800.0, 8000.0),
-        description="raw FERRE Teff; auxiliary target (avoids the IRFM/Gaia-XP "
+        description="raw FERRE Teff (avoids the IRFM/Gaia-XP "
                     "photometry leak baked into the calibrated teff)",
     ),
     LabelSpec(
@@ -112,77 +97,11 @@ LABELS: tuple[LabelSpec, ...] = (
         flag_column=("mg_h_flags",),
         sigma_floor=0.02, valid_range=(-3.0, 1.5),
     ),
-    # ---- Tier 2 (added to configs only after each earns its place) ----
-    LabelSpec(
-        name="c_h", tier=2, group="chem", unit="dex",
-        column=("c_h", "C_H"), error_column=("e_c_h", "c_h_err"),
-        flag_column=("c_h_flags",),
-        sigma_floor=0.03, valid_range=(-4.0, 1.5),
-    ),
-    LabelSpec(
-        name="n_h", tier=2, group="chem", unit="dex",
-        column=("n_h", "N_H"), error_column=("e_n_h", "n_h_err"),
-        flag_column=("n_h_flags",),
-        sigma_floor=0.05, valid_range=(-4.0, 1.5),
-    ),
-    LabelSpec(
-        name="o_h", tier=2, group="chem", unit="dex",
-        column=("o_h", "O_H"), error_column=("e_o_h", "o_h_err"),
-        flag_column=("o_h_flags",),
-        sigma_floor=0.03, valid_range=(-4.0, 1.5),
-    ),
-    LabelSpec(
-        name="si_h", tier=2, group="chem", unit="dex",
-        column=("si_h", "SI_H"), error_column=("e_si_h", "si_h_err"),
-        flag_column=("si_h_flags",),
-        sigma_floor=0.02, valid_range=(-4.0, 1.5),
-    ),
-    LabelSpec(
-        name="ca_h", tier=2, group="chem", unit="dex",
-        column=("ca_h", "CA_H"), error_column=("e_ca_h", "ca_h_err"),
-        flag_column=("ca_h_flags",),
-        sigma_floor=0.02, valid_range=(-4.0, 1.5),
-    ),
-    LabelSpec(
-        name="ni_h", tier=2, group="chem", unit="dex",
-        column=("ni_h", "NI_H"), error_column=("e_ni_h", "ni_h_err"),
-        flag_column=("ni_h_flags",),
-        sigma_floor=0.02, valid_range=(-4.0, 1.5),
-    ),
-    LabelSpec(
-        name="al_h", tier=2, group="chem", unit="dex",
-        column=("al_h", "AL_H"), error_column=("e_al_h", "al_h_err"),
-        flag_column=("al_h_flags",),
-        sigma_floor=0.03, valid_range=(-4.0, 1.5),
-    ),
-    LabelSpec(
-        name="mn_h", tier=2, group="chem", unit="dex",
-        column=("mn_h", "MN_H"), error_column=("e_mn_h", "mn_h_err"),
-        flag_column=("mn_h_flags",),
-        sigma_floor=0.03, valid_range=(-4.0, 1.5),
-    ),
-    # ---- Tier 3 / auxiliary-only elements (P1 latent bottleneck) -----------
-    # Never science outputs: trained only through the auxiliary head
-    # (`labels.aux`, weight `labels.weight_aux`). Floors are larger for weak /
-    # blended lines where formal (repeat-visit) errors are unrealistically small.
-    *(_aux_element(*a) for a in (
-        # name   floor  (valid range defaults to (-4, 1.5))
-        ("s_h", 0.05), ("k_h", 0.06), ("na_h", 0.08), ("ti_h", 0.05),
-        ("ti_2_h", 0.08), ("v_h", 0.10), ("cr_h", 0.06), ("co_h", 0.10),
-        ("cu_h", 0.12), ("ce_h", 0.15), ("nd_h", 0.15), ("p_h", 0.15),
-        ("c_1_h", 0.05),
-    )),
 )
 
 _BY_NAME: dict[str, LabelSpec] = {s.name: s for s in LABELS}
 
 TIER1: tuple[str, ...] = tuple(s.name for s in LABELS if s.tier == 1)
-
-
-# Elements usable as auxiliary targets: every registered abundance that is not
-# already a Tier-1 science label (fe_h / mg_h are trained in the chem head).
-AUX_CANDIDATES: tuple[str, ...] = tuple(
-    s.name for s in LABELS if s.tier >= 2 and s.group in ("chem", "aux"))
 
 
 def spec(name: str) -> LabelSpec:

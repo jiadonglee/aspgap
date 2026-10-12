@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from aspgapv3.augment import NoiseMatchAugment
-from aspgapv3.data.xp import N_COEF, NORM_INDEX, sample_spectra
+from aspgapv3.data.xp import N_COEF, NORM_INDEX, absolute_flux, sample_spectra
 from aspgapv3.data.xpnoise import N_TRI, pack_star, pixel_sigma_abs
 
 from test_xpnoise import synth_dm
@@ -49,7 +49,8 @@ def test_identity_when_gprime_equals_g_and_donor_noise_zero():
     out = aug(batch, gen=gen, fixed_g=g + 1e-9)       # s = 1 - O(1e-9)
     assert out["aug"].all()                           # the augmentation path ran
     # coef is stored as float32 in the batch, hence the loose tolerance
-    np.testing.assert_allclose(out["x"].numpy(), batch["x"].numpy(), rtol=0, atol=2e-6)
+    np.testing.assert_allclose(out["coef"].numpy(), batch["coef"].numpy(), rtol=1e-5)
+    assert out["x"] is batch["x"]                     # the network input is rebuilt by the caller, never here
     np.testing.assert_allclose(out["sigma"].numpy(), batch["sigma"].numpy(), rtol=1e-5)
     np.testing.assert_allclose(out["side"][:, :3].numpy(), batch["side"][:, :3].numpy(), atol=1e-5)
 
@@ -69,7 +70,7 @@ def test_noise_std_matches_propagated_sigma():
     assert out["aug"].all()
     s = 10 ** (-0.4 * (gp - 13.0))
     f550_new = 10.0 ** out["side"][:, 2].double()
-    flux = out["x"].double() * f550_new[:, None]      # back to absolute units
+    flux = torch.as_tensor(absolute_flux(out["coef"].double().numpy(), dm))      # absolute units
     donor = int(((gp - 10.0) / 0.1) // 1)
     sig_d = pixel_sigma_abs(bank["chol"][donor:donor + 1], dm)[0]
     emp = flux.std(0).numpy()
