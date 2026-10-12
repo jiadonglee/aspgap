@@ -7,6 +7,71 @@ distances, trained with noise-matched augmentation and extra training data beyon
 Labels come from APOGEE ASPCAP (Astra v0.6.0 `astraAllStarASPCAP`, HDU2; Teff is the raw FERRE value, since the
 published IRFM-calibrated Teff embeds Gaia XP photometry).
 
+## Quick start: predict parameters for your own Gaia stars
+
+You need Gaia DR3 XP continuous coefficients (`bp_coefficients`, `rp_coefficients`, 55 each) and `phot_g_mean_mag`.
+The trained model (3 MB, `weights/aspgap_v3_ext_r2.pt`) is in the repository; no training data is needed.
+
+```bash
+git clone https://github.com/jiadonglee/aspgap.git && cd aspgap && git checkout v3
+pip install -e ".[predict]"          # numpy, pandas, torch (+ pyarrow, astropy for parquet / FITS)
+pip install -e ".[fetch]"            # optional: also astroquery, to fetch coefficients by source_id
+```
+
+Python:
+
+```python
+import pandas as pd
+from aspgapv3.predict import predict, load_model
+
+df = pd.read_parquet("examples/example_input.parquet")   # source_id, bp_coefficients, rp_coefficients, phot_g_mean_mag
+model = load_model(device="cpu")                          # optional; predict() loads the packaged weights otherwise
+out = predict(df["bp_coefficients"], df["rp_coefficients"], df["phot_g_mean_mag"], model=model)
+print(out[["teff", "logg", "m_h", "alpha_m", "mg", "a0", "distance_pc"]].head())
+```
+
+Inputs may be `(N, 55)` arrays or the object / list columns the Gaia archive returns (also `"[...]"` strings).
+Rows with non-finite input give NaN outputs and `flag_bad_input`.
+
+Command line (`--device auto` uses CUDA if available; `--batch-size` and `--weights` are optional):
+
+```bash
+python scripts/predict.py --input stars.parquet --output out.csv          # .parquet, .csv or .fits in; .parquet / .csv out
+python scripts/predict.py --source-ids ids.txt --output out.parquet       # fetch XP coefficients + G from the Gaia archive
+python scripts/predict.py --source-ids 4295806720,4295806336 --output out.csv
+```
+
+`ids.txt` has one Gaia DR3 `source_id` per line. Fetching uses `astroquery` (DataLink for the coefficients, TAP for G)
+and can be slow (about a minute for a few stars, longer for many); stars without a published XP spectrum
+get NaN rows. For large samples, download the coefficients yourself and use `--input`.
+
+Output columns (APOGEE/ASPCAP scale; `*_err` are 1-sigma predicted uncertainties):
+
+| columns | meaning |
+|---|---|
+| `teff`, `logg`, `m_h`, `alpha_m` (+ `_err`) | Teff [K], log g [dex], [M/H], [alpha/M] |
+| `mg`, `mg_err` | intrinsic absolute G magnitude and its uncertainty |
+| `a0` | extinction at 550 nm [mag] (no uncertainty is predicted) |
+| `dist_mod`, `dist_mod_err` | `G - M_G - 0.789 A0` and `mg_err` (A0 error not included) |
+| `distance_pc` | `10^(dist_mod/5 + 1)`; fractional error is about `0.46 * dist_mod_err` |
+
+Quality flags (booleans; thresholds are stored in the weights file):
+
+| flag | meaning |
+|---|---|
+| `flag_bad_input` | non-finite coefficients or G |
+| `flag_g_outside` | G > 17.65, fainter than the training / augmentation limit |
+| `flag_teff_edge` | predicted Teff > 7500 K (training labels stop at 8000 K) or `flag_high_sigma_teff` |
+| `flag_high_sigma_{teff,logg,m_h,alpha_m,mg}` | predicted sigma above the 95th percentile on the APOGEE iid test set: Teff 182 K, logg 0.357, [M/H] 0.194, [alpha/M] 0.075, M_G 1.12 mag |
+
+Validity domain: FGKM stars with 3000 K < Teff < 8000 K, G <= 17.65, [M/H] > -4 (labels: APOGEE, GALAH DR4, globular
+clusters, LAMOST VMP). Hot stars are predicted too cool, faint / extinguished stars get too-large distances, and A0 is
+underestimated at high extinction; see "Known limitations" below. Predicted sigmas are not a reliable error flag for
+[alpha/M] or metal-poor [M/H]. The package works without the training dependencies; the weights are re-created from a
+run with `scripts/export_weights.py`.
+
+Citation: *to be added* (paper in preparation).
+
 ## Model (`configs/aspgap_dist_ext2.yaml`, run `aspgap_dist_ext_r2`)
 
 ```
@@ -60,13 +125,14 @@ python scripts/train.py --config configs/aspgap_dist_ext2.yaml --set run.name=NA
 python scripts/evaluate.py --run runs/NAME [--out-dir DIR]     # per-label / domain / distance tables, degraded-G' curve
 python scripts/eval_ood.py --run NAME --holdout                # OOD metrics -> runs/NAME/ood_holdout
 python scripts/ext_summary.py --runs aspgap_dist_r3 aspgap_dist_ext_r2 --out aspgap_dist_ext_r2   # comparison
-python -m pytest tests                                         # synthetic-data tests
+python -m pytest tests                                         # synthetic-data tests + packaged-weights test
+# training / dataset building need the extra dependencies:  pip install -e ".[build,test]"
 ```
 
 Layout: `configs/` (base, aspgap_dist, aspgap_dist_ext2), `scripts/` (build_*, train, evaluate, eval_ood, ext_summary),
 `src/aspgapv3/` (`models/` encoder, heads, distance; `data/` dataset, splits, XP / noise utilities; `labels/`
 ASPCAP registry and loaders; `augment.py`, `losses.py`, `metrics.py`, `dist_eval.py`, `ood.py`), `tests/`.
-`runs/` keeps only small text outputs (checkpoints and `data/` are git-ignored).
+`weights/` is the packaged inference model; `examples/` a small input/output pair. `runs/` keeps only small text outputs (checkpoints and `data/` are git-ignored).
 
 ## Results (run `aspgap_dist_ext_r2`, single seed)
 

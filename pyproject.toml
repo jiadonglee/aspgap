@@ -7,17 +7,18 @@ name = "aspgapv3"
 version = "0.1.0"
 description = "Gaia XP -> APOGEE-scale Teff, logg, [M/H], [alpha/M] plus M_G and A0"
 requires-python = ">=3.10"
-dependencies = [
+dependencies = [          # inference only needs these three
     "numpy",
     "pandas",
-    "pyyaml",
     "torch",
 ]
 
 [project.optional-dependencies]
-# used by scripts/, not by the training loop itself
-build = ["astropy", "pyarrow", "gaiaxpy", "h5py"]
-test = ["pytest"]
+predict = ["pyarrow", "astropy"]            # parquet / FITS input and output
+fetch = ["pyarrow", "astropy", "astroquery"]  # + fetch XP coefficients from the Gaia archive by source_id
+# training and dataset building (scripts/), not needed for prediction
+build = ["pyyaml", "astropy", "pyarrow", "gaiaxpy", "h5py"]
+test = ["pytest", "pyarrow", "pyyaml"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
