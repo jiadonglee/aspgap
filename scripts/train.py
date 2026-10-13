@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Train the AspGap-v3 model (Gaia XP coefficients -> APOGEE labels + M_G / A0).
 
-    python scripts/train.py --config configs/aspgap_dist_ext2.yaml --set run.name=aspgap_dist_ext_r2 run.out_dir=runs
+    python scripts/train.py --config configs/aspgap_dist_ext2_cn.yaml --set run.name=aspgap_dist_ext2_cn run.out_dir=runs
 
 Mixed precision: bf16 autocast on CUDA (`train.amp_dtype`); the NLL losses are computed in fp32 outside autocast;
 non-finite batches are skipped and counted per epoch (`n_nonfinite`).

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Train a config and evaluate it afterwards (generic: pick the config with CONFIG=).
 #   nohup scripts/run_aspgap_dist.sh aspgap_dist_r3 > logs/aspgap_dist_r3.log 2>&1 &                       # APOGEE only
-#   CONFIG=configs/aspgap_dist_ext2.yaml nohup scripts/run_aspgap_dist.sh aspgap_dist_ext_r2 > logs/ext_r2.log 2>&1 &   # final model
+#   CONFIG=configs/aspgap_dist_ext2_cn.yaml nohup scripts/run_aspgap_dist.sh aspgap_dist_ext2_cn > logs/ext2_cn.log 2>&1 &   # final model
+#   (needs data/processed/aspcap_v0.6.0_ext2_cn: python scripts/build_cn_labels.py)
 # Shared nodes: use at most half of nproc (dataloader workers included) and set OMP_NUM_THREADS etc. before calling.
 set -e
 NAME=${1:-aspgap_dist_r1}

@@ -2,7 +2,7 @@
 """Evaluate a trained run: per-label metrics per split and domain slice, M_G / A0 distance tables,
 OOD scores (latent kNN), and the degraded-G' validation curve.
 
-    python scripts/evaluate.py --run runs/aspgap_dist_ext_r2 [--splits iid_test sky_test] [--which best] \
+    python scripts/evaluate.py --run runs/aspgap_dist_ext2_cn [--splits iid_test sky_test] [--which best] \
         [--degrade-g 15 16 17 17.5] [--out-dir DIR]
 
 Degraded mode (needs build_xp_noise.py outputs): every star is re-run after noise-matched degradation to a

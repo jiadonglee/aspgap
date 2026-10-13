@@ -1,0 +1,13 @@
+# FINAL model (run aspgap_dist_ext2_cn): aspgap_dist_ext2 plus two giant-only chem labels c_fe = [C/Fe], n_fe = [N/Fe]
+# (ASPCAP giants: logg < 3.5, Teff < 5500 K; external rows masked; floors 0.03 / 0.05 dex in norm.npz).
+# Data root built by scripts/build_cn_labels.py.
+inherit: aspgap_dist_ext2.yaml
+
+run:
+  name: aspgap_dist_ext2_cn
+
+data:
+  root: data/processed/aspcap_v0.6.0_ext2_cn
+
+labels:
+  chem: [alpha_m, c_fe, n_fe]

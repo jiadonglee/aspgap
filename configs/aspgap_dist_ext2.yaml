@@ -1,4 +1,4 @@
-# FINAL model (run aspgap_dist_ext_r2): aspgap_dist trained on the APOGEE set + external labels appended by
+# Base of the final model (aspgap_dist_ext2_cn adds [C/Fe], [N/Fe]); run aspgap_dist_ext_r2 = this config alone: aspgap_dist trained on the APOGEE set + external labels appended by
 # scripts/build_ext_dataset.py (GALAH DR4 dwarfs / hot / metal-poor stars, globular-cluster members with
 # cluster-level [M/H] (E(B-V) <= 0.5, PM / parallax consistent, <= 100 per cluster), LAMOST VMP stars with [M/H]).
 # Validation, model selection and the iid / sky tests stay on the unchanged APOGEE splits.

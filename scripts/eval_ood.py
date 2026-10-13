@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Evaluate trained runs on the OOD test sets built by scripts/build_ood.py.
 
-    python scripts/eval_ood.py --run aspgap_dist_ext_r2 [--holdout] [--summary-only]
+    python scripts/eval_ood.py --run aspgap_dist_ext2_cn [--holdout] [--summary-only]
 
 Per run  -> <runs>/<run>/ood/{metrics_components,metrics_binned,metrics_clusters,metrics_distance,metrics_auc,
                               metrics_id}.csv, pred_<component>.parquet, report.md
