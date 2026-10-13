@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-"""Export a trained run to the single self-contained inference file weights/aspgap_v3_ext_r2.pt.
+"""Export a trained run to the single self-contained inference file weights/aspgap_v3_ext2_cn.pt.
 
-    python scripts/export_weights.py --run runs/aspgap_dist_ext_r2 --out weights/aspgap_v3_ext_r2.pt
+    python scripts/export_weights.py --run runs/aspgap_dist_ext2_cn --out weights/aspgap_v3_ext2_cn.pt \
+        --source-commit 1385ed4
 
 Needs the (private) training data root for the input scaler, label statistics and the sigma thresholds.
 Collaborators do NOT need this script: the exported file is committed to the repository.
@@ -19,13 +20,15 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from aspgapv3.models.distance import EXT_K  # noqa: E402
 
-LABELS = ["teff", "logg", "m_h", "alpha_m"]
+LABELS = ["teff", "logg", "m_h", "alpha_m", "c_fe", "n_fe"]
+VERSION = "aspgap_v3_ext2_cn"
+GIANT_TEFF, GIANT_LOGG = 5500.0, 3.5      # [C/Fe], [N/Fe] are valid for giants only (ASPCAP definition)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run", default="runs/aspgap_dist_ext_r2")
-    ap.add_argument("--out", default="weights/aspgap_v3_ext_r2.pt")
+    ap.add_argument("--run", default="runs/aspgap_dist_ext2_cn")
+    ap.add_argument("--out", default="weights/aspgap_v3_ext2_cn.pt")
     ap.add_argument("--source-commit", default=None, help="commit the run was trained at (default: HEAD)")
     ap.add_argument("--sigma-quantile", type=float, default=0.95)
     args = ap.parse_args()
@@ -56,24 +59,35 @@ def main() -> None:
                      "p01": float(np.percentile(v, 1)), "p99": float(np.percentile(v, 99)), "n": int(v.size)}
     domain["teff_edge"] = 7500.0
     domain["notes"] = ("Trained on APOGEE/ASPCAP (astra 0.6.0) (Teff<8000 K, SNR>50) + GALAH DR4, GC members, "
-                       "LAMOST VMP labels; G <= 17.65; Teff saturates near 8000 K.")
+                       "LAMOST VMP labels; G <= 17.65; Teff saturates near 8000 K. [C/Fe], [N/Fe] (ASPCAP scale) "
+                       "are trained on APOGEE giants only (logg<3.5, Teff<5500 K).")
 
     # sigma thresholds: quantile of predicted sigma on the APOGEE iid_test set
     p = np.load(run / "predictions_iid_test.npz")
     pd_ = np.load(run / "predictions_dist_iid_test.npz")
-    floors = {n: float(cfg["labels"]["sigma_floor"][n]) for n in LABELS}   # raw units, added in quadrature in training
+    # training floors (raw units, added in quadrature in the loss) are the norm.npz floor_norm * std the trainer used;
+    # c_fe / n_fe floors (0.03 / 0.05) are set in scripts/build_cn_labels.py, not in the run config
+    floors = {n: float(norm["floor_norm"][i] * norm["std"][i]) for n, i in zip(LABELS, idx)}
+    for n, f in cfg["labels"]["sigma_floor"].items():
+        if n in floors:
+            assert abs(floors[n] - f) < 1e-6 * max(1.0, f), (n, floors[n], f)
     # thresholds on the TOTAL reported uncertainty sqrt(sigma_model^2 + floor^2)
     sig = {n: float(np.quantile(np.hypot(p["sigma"][:, k], floors[n]), args.sigma_quantile))
            for k, n in enumerate(LABELS)}   # predictions npz holds raw-unit model sigma
+    # [C/Fe], [N/Fe] are reported for predicted giants only: threshold over the predicted giants of iid_test
+    gi = (p["mu"][:, 0] < GIANT_TEFF) & (p["mu"][:, 1] < GIANT_LOGG)
+    for n in ("c_fe", "n_fe"):
+        k = LABELS.index(n)
+        sig[n] = float(np.quantile(np.hypot(p["sigma"][gi, k], floors[n]), args.sigma_quantile))
     sig["mg"] = float(np.quantile(np.exp(0.5 * np.clip(pd_["logvar_mg"], -8, 8)), args.sigma_quantile))
     commit = args.source_commit or subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
 
     out = {
         "format_version": 1,
-        "version": "aspgap_v3_ext_r2",
+        "version": VERSION,
         "source": {"run": run.name, "git_commit": commit, "checkpoint": "ckpt_best.pt",
                    "epoch": int(ck["epoch"]), "val_loss": float(ck["val_loss"]),
-                   "train_config": "configs/aspgap_dist_ext2.yaml"},
+                   "train_config": "configs/aspgap_dist_ext2_cn.yaml"},
         "state_dict": {k: v.detach().float().contiguous() for k, v in ck["state_dict"].items()},
         "model_config": {"model": cfg["model"], "n_atm": ck["n_atm"], "n_chem": len(LABELS) - ck["n_atm"]},
         "input": {"n_coef": 110, "g_ref": 15.0, "g_exponent": 0.4,
@@ -81,7 +95,8 @@ def main() -> None:
                   "scale": torch.tensor(sc["scale"], dtype=torch.float64),
                   "description": "x = (coef / 10**(0.4*(15-G)) - center) / scale; coef = [BP(55), RP(55)]"},
         "labels": LABELS,
-        "label_units": {"teff": "K", "logg": "dex (cgs)", "m_h": "dex", "alpha_m": "dex", "mg": "mag", "a0": "mag"},
+        "label_units": {"teff": "K", "logg": "dex (cgs)", "m_h": "dex", "alpha_m": "dex", "c_fe": "dex", "n_fe": "dex",
+                        "mg": "mag", "a0": "mag"},
         "label_norm": {"mean": torch.tensor(norm["mean"][idx], dtype=torch.float64),
                        "std": torch.tensor(norm["std"][idx], dtype=torch.float64)},
         "label_floor": floors,   # err_total = sqrt(sigma_model^2 + floor^2)
@@ -90,7 +105,9 @@ def main() -> None:
                      "mg_scale": float(ck["state_dict"]["head_dist.mg_scale"]),
                      "formula": "dist_mod = G - M_G - k_g*A0; distance_pc = 10**(dist_mod/5 + 1)"},
         "domain": domain,
-        "sigma_thresholds": {"quantile": args.sigma_quantile, "reference": "APOGEE iid_test, total err", **sig},
+        "sigma_thresholds": {"quantile": args.sigma_quantile, "reference": "APOGEE iid_test, total err (c_fe, n_fe: predicted giants)", **sig},
+        "giant": {"teff_max": GIANT_TEFF, "logg_max": GIANT_LOGG,
+                  "note": "c_fe, n_fe (and c_n) are valid only for predicted Teff < 5500 K and logg < 3.5; trained on APOGEE giants (ASPCAP definition)"},
     }
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, args.out)

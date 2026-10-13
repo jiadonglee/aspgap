@@ -34,6 +34,22 @@ def test_reproduces_example_output(model, example):
         assert (out[c].to_numpy() == ref[c].to_numpy()).all(), c
 
 
+def test_cn_giants_only(model, example):
+    out = _run(example, model)
+    giant = (out["teff"] < 5500) & (out["logg"] < 3.5)
+    assert giant.any() and (~giant).any()                          # example has giants and non-giants
+    cols = ["c_fe", "c_fe_err", "n_fe", "n_fe_err", "c_n", "c_n_err", "c_fe_err_model", "n_fe_err_model"]
+    assert out.loc[~giant, cols].isna().all().all() and out.loc[giant, cols].notna().all().all()
+    assert (out["flag_cn_not_giant"] == ~giant).all()
+    np.testing.assert_allclose(out.loc[giant, "c_n"], (out["c_fe"] - out["n_fe"])[giant])
+    np.testing.assert_allclose(out.loc[giant, "c_n_err"], np.hypot(out["c_fe_err"], out["n_fe_err"])[giant])
+    for n in ("c_fe", "n_fe"):                                     # total = model (+) floor, flags use total err
+        i = model.labels.index(n)
+        np.testing.assert_allclose(out.loc[giant, n + "_err"], np.hypot(out[n + "_err_model"], model.floor[i])[giant])
+        assert (out["flag_high_sigma_" + n] == (out[n + "_err"] > model.thresholds[n]).fillna(False)).all()
+    assert model.labels == ["teff", "logg", "m_h", "alpha_m", "c_fe", "n_fe"] and model.version == "aspgap_v3_ext2_cn"
+
+
 def test_input_formats_agree(model, example, tmp_path):
     base = _run(example, model)
     bp = np.stack(example["bp_coefficients"]); rp = np.stack(example["rp_coefficients"])
@@ -60,6 +76,7 @@ def test_bad_rows_and_flags(model, example):
     assert out.loc[0, "flag_bad_input"] and out.loc[0, OUTPUT_COLUMNS].isna().all()
     assert out.loc[1, "flag_g_outside"] and not out.loc[2, "flag_g_outside"]
     assert not out.loc[2:, "flag_bad_input"].any()
+    assert not out.loc[0, "flag_cn_not_giant"]
 
 
 def test_shape_error(model):

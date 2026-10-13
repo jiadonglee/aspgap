@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Predict Teff, logg, [M/H], [alpha/M], M_G, A0 and distance from Gaia DR3 XP coefficients.
+"""Predict Teff, logg, [M/H], [alpha/M], [C/Fe], [N/Fe], [C/N] (giants), M_G, A0 and distance from Gaia DR3 XP coefficients.
 
     python scripts/predict.py --input stars.parquet --output out.csv
     python scripts/predict.py --source-ids ids.txt --output out.parquet     # fetch from the Gaia archive
@@ -50,7 +50,7 @@ def main() -> None:
     write_table(out, args.output)
     print(f"{model} -> wrote {len(out)} rows to {args.output}; "
           f"flagged: g_outside={int(res.flag_g_outside.sum())} teff_edge={int(res.flag_teff_edge.sum())} "
-          f"bad_input={int(res.flag_bad_input.sum())}")
+          f"bad_input={int(res.flag_bad_input.sum())} cn_not_giant={int(res.flag_cn_not_giant.sum())}")
 
 
 if __name__ == "__main__":
