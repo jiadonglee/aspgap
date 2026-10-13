@@ -118,5 +118,8 @@ def test_select_reproduces_ext2_training_rows():
 
 
 def test_gc_consistency_helpers():
+    pytest.importorskip("requests")        # build-only dependency (build_ood), not in the predict/test extras
+    if not (b.RAW / "harris10_mwgc.dat").exists():
+        pytest.skip("raw Harris catalogue (data/raw) not available")
     ebv = b.harris_ebv()
     assert abs(ebv["ngc104"] - 0.04) < 1e-6 and ebv["ngc6553"] > 0.5
